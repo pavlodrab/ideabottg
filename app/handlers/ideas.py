@@ -63,7 +63,7 @@ async def cmd_start_with_payload(
         return
 
     if message.from_user is not None:
-        wait = idea_rate_limiter.remaining(message.from_user.id)
+        wait = await idea_rate_limiter.remaining(session, message.from_user.id)
         if wait > 0:
             await message.answer(
                 f"⏳ Слишком быстро. Попробуй ещё раз через {wait} сек."
@@ -163,7 +163,7 @@ async def receive_anonymity(
 
     user = callback.from_user
 
-    wait = idea_rate_limiter.remaining(user.id)
+    wait = await idea_rate_limiter.remaining(session, user.id)
     if wait > 0:
         await callback.answer(
             f"⏳ Слишком быстро. Попробуй через {wait} сек.", show_alert=True
@@ -186,7 +186,6 @@ async def receive_anonymity(
         is_anonymous=is_anonymous,
         tag=tag,
     )
-    idea_rate_limiter.record(user.id)
     await state.clear()
 
     if isinstance(callback.message, Message):
@@ -236,7 +235,7 @@ async def capture_in_chat_reply(
 
     user = message.from_user
 
-    wait = idea_rate_limiter.remaining(user.id)
+    wait = await idea_rate_limiter.remaining(session, user.id)
     if wait > 0:
         try:
             await message.reply(
@@ -256,7 +255,6 @@ async def capture_in_chat_reply(
         is_anonymous=False,
         tag=DEFAULT_TAG,
     )
-    idea_rate_limiter.record(user.id)
 
     try:
         await message.reply(
