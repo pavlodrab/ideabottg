@@ -1,3 +1,5 @@
+from urllib.parse import urlparse
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -37,6 +39,21 @@ class Settings(BaseSettings):
         elif url.startswith("postgresql://") and "+asyncpg" not in url:
             url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
         return url
+
+    @property
+    def database_url_masked(self) -> str:
+        """A safe-to-log version of the database URL: scheme, host, port,
+        dbname, masked username (no password)."""
+        try:
+            parsed = urlparse(self.async_database_url)
+        except Exception:  # noqa: BLE001
+            return "<unparseable>"
+        host = parsed.hostname or "?"
+        port = parsed.port or "?"
+        dbname = (parsed.path or "/").lstrip("/") or "?"
+        user_marker = "user" if parsed.username else "(no user)"
+        scheme = parsed.scheme or "?"
+        return f"{scheme}://{user_marker}:***@{host}:{port}/{dbname}"
 
 
 settings = Settings()
