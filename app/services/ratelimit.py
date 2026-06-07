@@ -1,11 +1,22 @@
-"""In-memory rate limiter for idea submissions.
+"""Persistent rate limiter for idea submissions.
 
-Single shared instance is used by both the DM FSM and the in-chat reply
-capture. State is per-process; on restart everyone gets a fresh window,
-which is acceptable for a soft anti-spam guard.
+Uses the existing `ideas` table as the source of truth: the cooldown is
+measured against `MAX(created_at) WHERE from_user_id = ?`. This means:
+
+- Cooldowns survive bot restarts and work across multiple bot instances
+  sharing the database.
+- No extra writes — the limiter is read-only; submission itself is the
+  recorded event.
+- Failed submissions (length checks etc) don't count, which is what we
+  want anyway.
 """
-import time
+from datetime import datetime, timezone
 from typing import Final
+
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models import Idea
 
 DEFAULT_COOLDOWN_SEC: Final = 30
 
@@ -13,18 +24,28 @@ DEFAULT_COOLDOWN_SEC: Final = 30
 class IdeaRateLimiter:
     def __init__(self, cooldown_sec: int = DEFAULT_COOLDOWN_SEC) -> None:
         self.cooldown = cooldown_sec
-        self._last: dict[int, float] = {}
 
-    def remaining(self, user_id: int) -> int:
+    async def remaining(
+        self, session: AsyncSession, user_id: int
+    ) -> int:
         """Return seconds the user must wait, or 0 if allowed."""
-        last = self._last.get(user_id, 0.0)
-        wait = self.cooldown - (time.monotonic() - last)
-        if wait > 0:
-            return int(wait) + 1
-        return 0
+        result = await session.execute(
+            select(func.max(Idea.created_at)).where(Idea.from_user_id == user_id)
+        )
+        last = result.scalar_one_or_none()
+        if last is None:
+            return 0
 
-    def record(self, user_id: int) -> None:
-        self._last[user_id] = time.monotonic()
+        # SQLite returns naive datetimes; treat as UTC for consistency.
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+
+        now = datetime.now(timezone.utc)
+        delta = (now - last).total_seconds()
+        wait = self.cooldown - delta
+        if wait <= 0:
+            return 0
+        return int(wait) + 1
 
 
 idea_rate_limiter = IdeaRateLimiter()
