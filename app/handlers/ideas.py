@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.keyboards.menus import tag_keyboard
 from app.keyboards.prompt import anonymity_keyboard
-from app.models import Chat
+from app.models import Chat, Idea
 from app.services.admins import is_admin
 from app.services.ideas import (
     DEFAULT_TAG,
@@ -21,7 +21,7 @@ from app.services.ideas import (
 )
 from app.services.prompts import send_prompt_to_chat
 from app.services.ratelimit import idea_rate_limiter
-from app.states import IdeaSubmission
+from app.states import AdminReply, IdeaSubmission
 
 log = logging.getLogger(__name__)
 
@@ -36,6 +36,8 @@ STATUS_BADGES = {
     "archived": "🗑 В архиве",
 }
 STATUS_BY_ACTION = {"star": "starred", "read": "read", "archive": "archived"}
+
+MAX_REPLY_LEN = 2000
 
 
 # ---------- DM: deep-link entry point ----------
@@ -271,7 +273,9 @@ async def capture_in_chat_reply(
 
 @router.callback_query(F.data.startswith("card:"))
 async def owner_card_action(
-    callback: CallbackQuery, session: AsyncSession
+    callback: CallbackQuery,
+    session: AsyncSession,
+    state: FSMContext,
 ) -> None:
     if callback.from_user is None or not await is_admin(
         session, callback.from_user.id
@@ -289,14 +293,19 @@ async def owner_card_action(
         return
 
     _, action, idea_id_str = parts
-    new_status = STATUS_BY_ACTION.get(action)
-    if new_status is None:
-        await callback.answer()
-        return
 
     try:
         idea_id = int(idea_id_str)
     except ValueError:
+        await callback.answer()
+        return
+
+    if action == "reply":
+        await _start_reply_flow(callback, session, state, idea_id)
+        return
+
+    new_status = STATUS_BY_ACTION.get(action)
+    if new_status is None:
         await callback.answer()
         return
 
@@ -317,6 +326,94 @@ async def owner_card_action(
             )
         except Exception as exc:  # noqa: BLE001
             log.warning("edit idea card failed: %s", exc)
+
+
+# ---------- Owner: reply to author ----------
+
+async def _start_reply_flow(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    state: FSMContext,
+    idea_id: int,
+) -> None:
+    idea = await session.get(Idea, idea_id)
+    if idea is None:
+        await callback.answer("Идея не найдена", show_alert=True)
+        return
+
+    await state.set_state(AdminReply.waiting_text)
+    await state.update_data(idea_id=idea.id, author_id=idea.from_user_id)
+
+    preview = (idea.text or "").replace("\n", " ")
+    if len(preview) > 80:
+        preview = preview[:80] + "…"
+
+    await callback.answer()
+    await callback.bot.send_message(
+        callback.from_user.id,
+        f"✉️ <b>Ответ на идею #{idea.id}</b>\n\n"
+        f"<i>«{html.escape(preview)}»</i>\n\n"
+        "Отправь следующим сообщением текст ответа.\n"
+        "Автор получит его в личку от меня.\n\n"
+        "Отмена — /cancel",
+    )
+
+
+@router.message(AdminReply.waiting_text, F.chat.type == ChatType.PRIVATE, F.text)
+async def receive_reply_text(
+    message: Message, state: FSMContext, bot: Bot, session: AsyncSession
+) -> None:
+    text = (message.text_html or message.text or "").strip()
+    if text.startswith("/"):
+        return
+    if len(text) < 1:
+        await message.answer("Пустой ответ. Попробуй ещё раз или /cancel.")
+        return
+    if len(text) > MAX_REPLY_LEN:
+        await message.answer(f"Слишком длинно. Уложись в {MAX_REPLY_LEN} символов.")
+        return
+
+    data = await state.get_data()
+    idea_id = data.get("idea_id")
+    author_id = data.get("author_id")
+    if not idea_id or not author_id:
+        await state.clear()
+        return
+
+    idea = await session.get(Idea, idea_id)
+    if idea is None:
+        await state.clear()
+        await message.answer("⚠️ Идея исчезла из базы.")
+        return
+
+    preview = (idea.text or "").replace("\n", " ")
+    if len(preview) > 120:
+        preview = preview[:120] + "…"
+
+    delivered = True
+    try:
+        await bot.send_message(
+            author_id,
+            f"💬 <b>Ответ на твою идею #{idea.id}</b>\n\n"
+            f"{text}\n\n"
+            f"━━━━━━━━━━━━\n"
+            f"<i>Идея: «{html.escape(preview)}»</i>",
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("deliver reply for idea %s to user %s failed: %s", idea_id, author_id, exc)
+        delivered = False
+
+    await state.clear()
+
+    if delivered:
+        await message.answer(
+            f"✅ Ответ отправлен автору идеи #{idea.id}."
+        )
+    else:
+        await message.answer(
+            "⚠️ Не удалось доставить ответ — возможно, пользователь "
+            "заблокировал бота или ни разу не писал ему /start."
+        )
 
 
 # ---------- Admin: manual prompt for testing ----------

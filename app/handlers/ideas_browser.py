@@ -1,12 +1,15 @@
 """Owner-side /ideas browser with status filters and pagination."""
+import csv
 import html
+import io
 import logging
 from datetime import datetime, timezone
 
 from aiogram import F, Router
 from aiogram.enums import ChatType
 from aiogram.filters import Command
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, Message
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.keyboards.menus import (
@@ -196,4 +199,95 @@ def _format_meta(idea: Idea) -> str:
     return (
         f"\n━━━━━━━━━━━━\n"
         f"<i>{tag_label(idea.tag)}  ·  {status}  ·  {when}</i>"
+    )
+
+
+
+
+# ---------- /export CSV ----------
+
+EXPORT_HEADER = [
+    "id",
+    "created_at",
+    "status",
+    "tag",
+    "chat_id",
+    "chat_title",
+    "from_user_id",
+    "from_username",
+    "is_anonymous",
+    "text",
+]
+
+
+@router.message(Command("export"), F.chat.type == ChatType.PRIVATE)
+async def cmd_export(message: Message, session: AsyncSession) -> None:
+    if not await _require_admin(message, session):
+        return
+
+    parts = (message.text or "").split(maxsplit=1)
+    filter_key = parts[1].strip() if len(parts) > 1 else "all"
+    if filter_key not in STATUS_FILTERS:
+        await message.answer(
+            "⚠️ Фильтр должен быть один из: "
+            f"{', '.join(STATUS_FILTERS.keys())}\n"
+            "По умолчанию <code>/export</code> = все идеи."
+        )
+        return
+
+    statuses = STATUS_FILTERS[filter_key]
+    stmt = select(Idea).order_by(Idea.created_at.asc())
+    if statuses is not None:
+        stmt = stmt.where(Idea.status.in_(statuses))
+    result = await session.execute(stmt)
+    ideas = list(result.scalars().all())
+
+    if not ideas:
+        await message.answer("📭 Нечего экспортировать — идей по этому фильтру нет.")
+        return
+
+    # resolve chat titles in one query to avoid N+1
+    chat_ids = {i.chat_id for i in ideas if i.chat_id is not None}
+    chat_titles: dict[int, str] = {}
+    if chat_ids:
+        result = await session.execute(
+            select(Chat.chat_id, Chat.title).where(Chat.chat_id.in_(chat_ids))
+        )
+        chat_titles = {row[0]: (row[1] or "") for row in result.all()}
+
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(EXPORT_HEADER)
+    for idea in ideas:
+        writer.writerow(
+            [
+                idea.id,
+                idea.created_at.astimezone(timezone.utc).isoformat()
+                if isinstance(idea.created_at, datetime)
+                else "",
+                idea.status,
+                idea.tag,
+                idea.chat_id if idea.chat_id is not None else "",
+                chat_titles.get(idea.chat_id, "") if idea.chat_id is not None else "",
+                idea.from_user_id,
+                idea.from_username or "",
+                "1" if idea.is_anonymous else "0",
+                (idea.text or "").replace("\r\n", "\n"),
+            ]
+        )
+
+    data = buffer.getvalue().encode("utf-8-sig")  # BOM helps Excel detect UTF-8
+    filename = (
+        f"ideas-{filter_key}-"
+        f"{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}.csv"
+    )
+    document = BufferedInputFile(data, filename=filename)
+
+    label = dict(IDEAS_FILTERS).get(filter_key, filter_key)
+    await message.answer_document(
+        document,
+        caption=(
+            f"📤 <b>Экспорт</b>: {label}\n"
+            f"Идей: {len(ideas)}"
+        ),
     )

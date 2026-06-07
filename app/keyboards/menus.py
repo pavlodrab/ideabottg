@@ -265,6 +265,12 @@ def idea_view_keyboard(
             ],
             [
                 InlineKeyboardButton(
+                    text="✉️ Ответить автору",
+                    callback_data=f"card:reply:{idea_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
                     text="⬅️ К списку",
                     callback_data=f"ideas:list:{filter_key}:{page}",
                 )

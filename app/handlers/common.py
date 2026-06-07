@@ -54,5 +54,6 @@ async def cmd_help(message: Message, session: AsyncSession) -> None:
         "• /resume &lt;chat_id&gt; — снова активен\n"
         "• /setcron &lt;chat_id&gt; &lt;cron|off&gt; — расписание текстом\n"
         "• /test_prompt &lt;chat_id&gt; — отправить призыв сейчас\n"
+        "• /export [filter] — выгрузить CSV (filter: new/starred/read/archived/all)\n"
         "• /cancel — отменить текущий ввод"
     )

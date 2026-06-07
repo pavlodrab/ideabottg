@@ -17,3 +17,7 @@ class ScheduleCustom(StatesGroup):
 
 class AdminAdd(StatesGroup):
     waiting_user = State()
+
+
+class AdminReply(StatesGroup):
+    waiting_text = State()

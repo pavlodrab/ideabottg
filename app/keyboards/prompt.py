@@ -42,5 +42,11 @@ def owner_card_keyboard(idea_id: int) -> InlineKeyboardMarkup:
                     text="🗑", callback_data=f"card:archive:{idea_id}"
                 ),
             ],
+            [
+                InlineKeyboardButton(
+                    text="✉️ Ответить автору",
+                    callback_data=f"card:reply:{idea_id}",
+                )
+            ],
         ]
     )
