@@ -1,8 +1,9 @@
 import html
 import logging
-from typing import Optional
+from typing import NamedTuple, Optional
 
 from aiogram import Bot
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.keyboards.prompt import owner_card_keyboard
@@ -19,6 +20,33 @@ DEFAULT_PROMPT = (
 )
 
 
+class TagInfo(NamedTuple):
+    key: str
+    label: str
+    icon: str
+
+
+TAGS: list[TagInfo] = [
+    TagInfo("feature", "Идея", "💡"),
+    TagInfo("bug", "Баг", "🐛"),
+    TagInfo("feedback", "Фидбек", "💬"),
+    TagInfo("other", "Другое", "🎁"),
+]
+TAGS_BY_KEY: dict[str, TagInfo] = {t.key: t for t in TAGS}
+DEFAULT_TAG = "other"
+
+
+def tag_label(key: str | None) -> str:
+    if not key:
+        return f"{TAGS_BY_KEY[DEFAULT_TAG].icon} {TAGS_BY_KEY[DEFAULT_TAG].label}"
+    info = TAGS_BY_KEY.get(key)
+    if info is None:
+        return key
+    return f"{info.icon} {info.label}"
+
+
+# ---------- create / update ----------
+
 async def create_idea(
     session: AsyncSession,
     *,
@@ -27,6 +55,7 @@ async def create_idea(
     from_username: Optional[str],
     text: str,
     is_anonymous: bool,
+    tag: str = DEFAULT_TAG,
 ) -> Idea:
     idea = Idea(
         chat_id=chat_id,
@@ -34,6 +63,7 @@ async def create_idea(
         from_username=from_username,
         text=text,
         is_anonymous=is_anonymous,
+        tag=tag if tag in TAGS_BY_KEY else DEFAULT_TAG,
     )
     session.add(idea)
     await session.commit()
@@ -52,22 +82,61 @@ async def set_idea_status(
     return idea
 
 
+# ---------- read / list ----------
+
+STATUS_FILTERS: dict[str, list[str] | None] = {
+    "all": None,
+    "new": ["new"],
+    "starred": ["starred"],
+    "read": ["read"],
+    "archived": ["archived"],
+}
+
+
+async def list_ideas(
+    session: AsyncSession,
+    *,
+    status_filter: str = "new",
+    page: int = 0,
+    page_size: int = 8,
+) -> list[Idea]:
+    stmt = select(Idea).order_by(Idea.created_at.desc())
+    statuses = STATUS_FILTERS.get(status_filter)
+    if statuses is not None:
+        stmt = stmt.where(Idea.status.in_(statuses))
+    stmt = stmt.offset(page * page_size).limit(page_size)
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
+async def count_ideas(
+    session: AsyncSession, *, status_filter: str = "new"
+) -> int:
+    stmt = select(func.count(Idea.id))
+    statuses = STATUS_FILTERS.get(status_filter)
+    if statuses is not None:
+        stmt = stmt.where(Idea.status.in_(statuses))
+    result = await session.execute(stmt)
+    return int(result.scalar() or 0)
+
+
+# ---------- formatting ----------
+
 def _format_author(idea: Idea) -> str:
     if idea.is_anonymous:
         return "🙈 Аноним"
     if idea.from_username:
         return f"@{idea.from_username}"
-    return (
-        f"<a href='tg://user?id={idea.from_user_id}'>пользователь</a>"
-    )
+    return f"<a href='tg://user?id={idea.from_user_id}'>пользователь</a>"
 
 
 def format_idea_card(idea: Idea, chat_title: str | None) -> str:
     author = _format_author(idea)
     location = chat_title or "ЛС"
     body = html.escape(idea.text)
+    badge = tag_label(idea.tag)
     return (
-        f"💡 <b>Идея #{idea.id}</b>\n"
+        f"💡 <b>Идея #{idea.id}</b>  ·  {badge}\n"
         f"📍 <b>{html.escape(location)}</b>\n"
         f"👤 {author}\n"
         f"━━━━━━━━━━━━\n"

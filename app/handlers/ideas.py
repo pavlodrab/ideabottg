@@ -8,15 +8,19 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.keyboards.menus import tag_keyboard
 from app.keyboards.prompt import anonymity_keyboard
 from app.models import Chat
 from app.services.admins import is_admin
 from app.services.ideas import (
+    DEFAULT_TAG,
+    TAGS_BY_KEY,
     create_idea,
     dispatch_idea_to_admins,
     set_idea_status,
 )
 from app.services.prompts import send_prompt_to_chat
+from app.services.ratelimit import idea_rate_limiter
 from app.states import IdeaSubmission
 
 log = logging.getLogger(__name__)
@@ -56,6 +60,14 @@ async def cmd_start_with_payload(
         await message.answer("⚠️ Неверная ссылка.")
         return
 
+    if message.from_user is not None:
+        wait = idea_rate_limiter.remaining(message.from_user.id)
+        if wait > 0:
+            await message.answer(
+                f"⏳ Слишком быстро. Попробуй ещё раз через {wait} сек."
+            )
+            return
+
     chat = await session.get(Chat, chat_id)
     chat_title = chat.title if chat else None
 
@@ -90,14 +102,41 @@ async def receive_idea_text(message: Message, state: FSMContext) -> None:
         return
 
     await state.update_data(text=text)
-    await state.set_state(IdeaSubmission.waiting_anonymity)
+    await state.set_state(IdeaSubmission.waiting_tag)
     await message.answer(
-        "Отправить анонимно или под своим именем?",
-        reply_markup=anonymity_keyboard(),
+        "🏷 <b>Какого типа эта идея?</b>",
+        reply_markup=tag_keyboard(),
     )
 
 
-# ---------- DM: anonymity choice ----------
+# ---------- DM: tag selection ----------
+
+@router.callback_query(IdeaSubmission.waiting_tag, F.data.startswith("tag:"))
+async def receive_idea_tag(callback: CallbackQuery, state: FSMContext) -> None:
+    if callback.data is None:
+        await callback.answer()
+        return
+
+    choice = callback.data.split(":", 1)[1]
+    if choice == "cancel":
+        await state.clear()
+        if isinstance(callback.message, Message):
+            await callback.message.edit_text("✖️ Отменено.")
+        await callback.answer()
+        return
+
+    tag = choice if choice in TAGS_BY_KEY else DEFAULT_TAG
+    await state.update_data(tag=tag)
+    await state.set_state(IdeaSubmission.waiting_anonymity)
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text(
+            "Отправить анонимно или под своим именем?",
+            reply_markup=anonymity_keyboard(),
+        )
+    await callback.answer()
+
+
+# ---------- DM: anonymity choice + save ----------
 
 @router.callback_query(
     IdeaSubmission.waiting_anonymity, F.data.startswith("anon:")
@@ -113,7 +152,6 @@ async def receive_anonymity(
         return
 
     choice = callback.data.split(":", 1)[1]
-
     if choice == "cancel":
         await state.clear()
         if isinstance(callback.message, Message):
@@ -121,12 +159,21 @@ async def receive_anonymity(
         await callback.answer()
         return
 
+    user = callback.from_user
+
+    wait = idea_rate_limiter.remaining(user.id)
+    if wait > 0:
+        await callback.answer(
+            f"⏳ Слишком быстро. Попробуй через {wait} сек.", show_alert=True
+        )
+        return
+
     is_anonymous = choice == "1"
     data = await state.get_data()
     text = data.get("text", "")
     chat_id = data.get("chat_id")
     chat_title = data.get("chat_title")
-    user = callback.from_user
+    tag = data.get("tag", DEFAULT_TAG)
 
     idea = await create_idea(
         session,
@@ -135,7 +182,9 @@ async def receive_anonymity(
         from_username=user.username,
         text=text,
         is_anonymous=is_anonymous,
+        tag=tag,
     )
+    idea_rate_limiter.record(user.id)
     await state.clear()
 
     if isinstance(callback.message, Message):
@@ -184,6 +233,18 @@ async def capture_in_chat_reply(
         return
 
     user = message.from_user
+
+    wait = idea_rate_limiter.remaining(user.id)
+    if wait > 0:
+        try:
+            await message.reply(
+                f"⏳ Слишком быстро. Подожди {wait} сек.",
+                disable_notification=True,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        return
+
     idea = await create_idea(
         session,
         chat_id=chat.chat_id,
@@ -191,7 +252,9 @@ async def capture_in_chat_reply(
         from_username=user.username,
         text=text,
         is_anonymous=False,
+        tag=DEFAULT_TAG,
     )
+    idea_rate_limiter.record(user.id)
 
     try:
         await message.reply(
@@ -295,7 +358,7 @@ async def cmd_test_prompt(
         await message.answer("⚠️ Не удалось отправить призыв (см. логи).")
 
 
-# ---------- Admin: minimal cron setter (proper wizard comes in next PR) ----------
+# ---------- Admin: minimal cron setter (proper wizard in admin_menu) ----------
 
 @router.message(Command("setcron"), F.chat.type == ChatType.PRIVATE)
 async def cmd_setcron(
@@ -310,11 +373,7 @@ async def cmd_setcron(
     if len(text) < 3:
         await message.answer(
             "Использование: <code>/setcron &lt;chat_id&gt; &lt;cron&gt;</code>\n\n"
-            "Примеры:\n"
-            "<code>/setcron -100123 0 18 * * *</code> — каждый день в 18:00\n"
-            "<code>/setcron -100123 0 12 * * 1</code> — каждый понедельник в 12:00\n"
-            "<code>/setcron -100123 0 */3 * * *</code> — каждые 3 часа\n\n"
-            "Чтобы выключить расписание: <code>/setcron &lt;chat_id&gt; off</code>"
+            "Удобнее — через /menu → Чаты → Расписание."
         )
         return
 
@@ -335,10 +394,11 @@ async def cmd_setcron(
         await session.commit()
         if scheduler is not None:
             await scheduler.sync_chat(chat_id)
-        await message.answer(f"⏸ Расписание отключено для <b>{chat.title or chat_id}</b>.")
+        await message.answer(
+            f"⏸ Расписание отключено для <b>{chat.title or chat_id}</b>."
+        )
         return
 
-    # quick validity check using APScheduler
     from apscheduler.triggers.cron import CronTrigger
 
     try:

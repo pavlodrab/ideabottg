@@ -47,6 +47,7 @@ async def cmd_help(message: Message, session: AsyncSession) -> None:
         "<b>Меню</b>\n"
         "• /menu — главное меню\n"
         "• /chats — чаты и их настройки\n"
+        "• /ideas — все идеи с фильтрами\n"
         "• /admins — управление админами\n\n"
         "<b>Шорткаты</b>\n"
         "• /pause &lt;chat_id&gt; — пауза\n"

@@ -10,6 +10,7 @@ def home_keyboard(chat_count: int, admin_count: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=f"📋 Чаты ({chat_count})", callback_data="chat:list:0")],
+            [InlineKeyboardButton(text="💡 Идеи", callback_data="ideas:filter:new")],
             [InlineKeyboardButton(text=f"👥 Админы ({admin_count})", callback_data="admin:list")],
         ]
     )
@@ -150,5 +151,123 @@ def cancel_keyboard(back_callback: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Отмена", callback_data=back_callback)]
+        ]
+    )
+
+
+def tag_keyboard() -> InlineKeyboardMarkup:
+    from app.services.ideas import TAGS
+
+    rows: list[list[InlineKeyboardButton]] = []
+    for i in range(0, len(TAGS), 2):
+        row: list[InlineKeyboardButton] = []
+        for tag in TAGS[i : i + 2]:
+            row.append(
+                InlineKeyboardButton(
+                    text=f"{tag.icon} {tag.label}",
+                    callback_data=f"tag:{tag.key}",
+                )
+            )
+        rows.append(row)
+    rows.append(
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="tag:cancel")]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+IDEAS_FILTERS = [
+    ("new", "🆕 Новые"),
+    ("starred", "⭐ Избранное"),
+    ("read", "✅ Прочитано"),
+    ("archived", "🗑 Архив"),
+    ("all", "📋 Все"),
+]
+
+
+def ideas_filter_keyboard(active: str) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    row: list[InlineKeyboardButton] = []
+    for key, label in IDEAS_FILTERS:
+        marker = "• " if key == active else ""
+        row.append(
+            InlineKeyboardButton(
+                text=f"{marker}{label}",
+                callback_data=f"ideas:list:{key}:0",
+            )
+        )
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="home")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def ideas_list_keyboard(
+    ideas: list,
+    *,
+    filter_key: str,
+    page: int,
+    has_next: bool,
+) -> InlineKeyboardMarkup:
+    from app.services.ideas import TAGS_BY_KEY
+
+    rows: list[list[InlineKeyboardButton]] = []
+    for idea in ideas:
+        tag_info = TAGS_BY_KEY.get(idea.tag) or TAGS_BY_KEY["other"]
+        preview = (idea.text or "").replace("\n", " ")[:40]
+        label = f"{tag_info.icon} #{idea.id} {preview}"[:60]
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=label,
+                    callback_data=f"ideas:open:{idea.id}:{filter_key}:{page}",
+                )
+            ]
+        )
+
+    nav: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav.append(
+            InlineKeyboardButton(
+                text="⬅️", callback_data=f"ideas:list:{filter_key}:{page - 1}"
+            )
+        )
+    if has_next:
+        nav.append(
+            InlineKeyboardButton(
+                text="➡️", callback_data=f"ideas:list:{filter_key}:{page + 1}"
+            )
+        )
+    if nav:
+        rows.append(nav)
+
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="🔄 Сменить фильтр", callback_data=f"ideas:filter:{filter_key}"
+            )
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def idea_view_keyboard(
+    idea_id: int, filter_key: str, page: int
+) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="⭐", callback_data=f"card:star:{idea_id}"),
+                InlineKeyboardButton(text="✅", callback_data=f"card:read:{idea_id}"),
+                InlineKeyboardButton(text="🗑", callback_data=f"card:archive:{idea_id}"),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⬅️ К списку",
+                    callback_data=f"ideas:list:{filter_key}:{page}",
+                )
+            ],
         ]
     )

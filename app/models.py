@@ -57,6 +57,7 @@ class Idea(Base):
     text: Mapped[str] = mapped_column(Text, nullable=False)
     is_anonymous: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     status: Mapped[str] = mapped_column(String(16), default="new", nullable=False)
+    tag: Mapped[str] = mapped_column(String(16), default="other", nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
