@@ -23,6 +23,8 @@ async def main() -> None:
     )
     log = logging.getLogger("ideabottg")
 
+    log.info("DB target: %s", settings.database_url_masked)
+
     bot = build_bot()
     dp = build_dispatcher()
     register_middlewares(dp)

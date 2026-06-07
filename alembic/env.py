@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from logging.config import fileConfig
 
 from sqlalchemy import pool
@@ -18,6 +19,12 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 target_metadata = Base.metadata
+
+# Print the masked DB URL so deployment logs reveal what we're trying to
+# connect to without leaking the password.
+logging.getLogger("alembic.env").warning(
+    "alembic connecting to %s", settings.database_url_masked
+)
 
 
 def run_migrations_offline() -> None:
