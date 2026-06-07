@@ -25,7 +25,10 @@ def _format_chat_line(title: str | None, chat_id: int, is_active: bool) -> str:
 
 @router.my_chat_member(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP, ChatType.CHANNEL}))
 async def on_my_chat_member(
-    event: ChatMemberUpdated, bot: Bot, session: AsyncSession
+    event: ChatMemberUpdated,
+    bot: Bot,
+    session: AsyncSession,
+    scheduler=None,
 ) -> None:
     """Track when the bot is added to or removed from a chat."""
     old_status = event.old_chat_member.status
@@ -44,6 +47,9 @@ async def on_my_chat_member(
         title=chat.title,
         is_active=became_present,
     )
+
+    if scheduler is not None:
+        await scheduler.sync_chat(chat.id)
 
     log.info(
         "chat_member %s: chat_id=%s title=%r status=%s -> %s (created=%s)",
@@ -100,17 +106,21 @@ async def cmd_chats(message: Message, session: AsyncSession) -> None:
 
 
 @router.message(Command("pause"), F.chat.type == ChatType.PRIVATE)
-async def cmd_pause(message: Message, session: AsyncSession) -> None:
-    await _toggle_chat_active(message, session, active=False)
+async def cmd_pause(message: Message, session: AsyncSession, scheduler=None) -> None:
+    await _toggle_chat_active(message, session, scheduler, active=False)
 
 
 @router.message(Command("resume"), F.chat.type == ChatType.PRIVATE)
-async def cmd_resume(message: Message, session: AsyncSession) -> None:
-    await _toggle_chat_active(message, session, active=True)
+async def cmd_resume(message: Message, session: AsyncSession, scheduler=None) -> None:
+    await _toggle_chat_active(message, session, scheduler, active=True)
 
 
 async def _toggle_chat_active(
-    message: Message, session: AsyncSession, *, active: bool
+    message: Message,
+    session: AsyncSession,
+    scheduler,
+    *,
+    active: bool,
 ) -> None:
     if message.from_user is None or not await is_admin(session, message.from_user.id):
         return
@@ -134,6 +144,9 @@ async def _toggle_chat_active(
     if chat is None:
         await message.answer("⚠️ Такого чата нет в базе.")
         return
+
+    if scheduler is not None:
+        await scheduler.sync_chat(chat_id)
 
     state = "🟢 активен" if active else "🟡 на паузе"
     await message.answer(f"{state}: <b>{chat.title or chat.chat_id}</b>")

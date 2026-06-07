@@ -6,6 +6,7 @@ from app.config import settings
 from app.db import SessionLocal
 from app.handlers import register_handlers
 from app.middlewares import register_middlewares
+from app.scheduler import IdeaScheduler
 from app.services.admins import ensure_owner
 
 
@@ -29,12 +30,20 @@ async def main() -> None:
 
     await on_startup()
 
+    scheduler = IdeaScheduler(bot)
+    await scheduler.start()
+
     me = await bot.get_me()
     log.info("Starting bot @%s (id=%s)", me.username, me.id)
 
     try:
-        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+        await dp.start_polling(
+            bot,
+            scheduler=scheduler,
+            allowed_updates=dp.resolve_used_update_types(),
+        )
     finally:
+        await scheduler.shutdown()
         await bot.session.close()
 
 
