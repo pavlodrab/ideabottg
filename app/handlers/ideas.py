@@ -8,18 +8,15 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.keyboards.prompt import (
-    anonymity_keyboard,
-    prompt_keyboard,
-)
+from app.keyboards.prompt import anonymity_keyboard
 from app.models import Chat
 from app.services.admins import is_admin
 from app.services.ideas import (
-    DEFAULT_PROMPT,
     create_idea,
     dispatch_idea_to_admins,
     set_idea_status,
 )
+from app.services.prompts import send_prompt_to_chat
 from app.states import IdeaSubmission
 
 log = logging.getLogger(__name__)
@@ -291,16 +288,71 @@ async def cmd_test_prompt(
         await message.answer("⚠️ Чат на паузе. Сначала /resume.")
         return
 
-    me = await bot.get_me()
-    text = chat.prompt_text or DEFAULT_PROMPT
-    keyboard = prompt_keyboard(me.username, chat.chat_id)
+    ok = await send_prompt_to_chat(bot, session, chat)
+    if ok:
+        await message.answer("✅ Призыв отправлен.")
+    else:
+        await message.answer("⚠️ Не удалось отправить призыв (см. логи).")
 
-    try:
-        sent = await bot.send_message(chat_id, text, reply_markup=keyboard)
-    except Exception as exc:  # noqa: BLE001
-        await message.answer(f"⚠️ Не удалось отправить: {exc}")
+
+# ---------- Admin: minimal cron setter (proper wizard comes in next PR) ----------
+
+@router.message(Command("setcron"), F.chat.type == ChatType.PRIVATE)
+async def cmd_setcron(
+    message: Message, session: AsyncSession, scheduler=None
+) -> None:
+    if message.from_user is None or not await is_admin(
+        session, message.from_user.id
+    ):
         return
 
-    chat.last_prompt_message_id = sent.message_id
+    text = (message.text or "").split(maxsplit=2)
+    if len(text) < 3:
+        await message.answer(
+            "Использование: <code>/setcron &lt;chat_id&gt; &lt;cron&gt;</code>\n\n"
+            "Примеры:\n"
+            "<code>/setcron -100123 0 18 * * *</code> — каждый день в 18:00\n"
+            "<code>/setcron -100123 0 12 * * 1</code> — каждый понедельник в 12:00\n"
+            "<code>/setcron -100123 0 */3 * * *</code> — каждые 3 часа\n\n"
+            "Чтобы выключить расписание: <code>/setcron &lt;chat_id&gt; off</code>"
+        )
+        return
+
+    try:
+        chat_id = int(text[1].strip())
+    except ValueError:
+        await message.answer("⚠️ chat_id должен быть числом.")
+        return
+
+    cron_raw = text[2].strip()
+    chat = await session.get(Chat, chat_id)
+    if chat is None:
+        await message.answer("⚠️ Такого чата нет в базе.")
+        return
+
+    if cron_raw.lower() in {"off", "none", "disable"}:
+        chat.schedule_cron = None
+        await session.commit()
+        if scheduler is not None:
+            await scheduler.sync_chat(chat_id)
+        await message.answer(f"⏸ Расписание отключено для <b>{chat.title or chat_id}</b>.")
+        return
+
+    # quick validity check using APScheduler
+    from apscheduler.triggers.cron import CronTrigger
+
+    try:
+        CronTrigger.from_crontab(cron_raw)
+    except ValueError as exc:
+        await message.answer(f"⚠️ Невалидный cron: {exc}")
+        return
+
+    chat.schedule_cron = cron_raw
     await session.commit()
-    await message.answer("✅ Призыв отправлен.")
+    if scheduler is not None:
+        await scheduler.sync_chat(chat_id)
+
+    await message.answer(
+        f"✅ Расписание для <b>{chat.title or chat_id}</b>:\n"
+        f"<code>{cron_raw}</code>"
+    )
