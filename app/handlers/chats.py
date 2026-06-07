@@ -1,13 +1,18 @@
+"""Chat membership tracking + text-shortcut /pause and /resume.
+
+The interactive chat list is provided by app.handlers.admin_menu; this module
+only handles the bot's join/leave events and the text-only fallback toggles.
+"""
 import logging
 
-from aiogram import Bot, Router, F
+from aiogram import Bot, F, Router
 from aiogram.enums import ChatMemberStatus, ChatType
 from aiogram.filters import Command
 from aiogram.types import ChatMemberUpdated, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.admins import get_idea_recipients, is_admin
-from app.services.chats import list_chats, set_chat_active, upsert_chat
+from app.services.chats import set_chat_active, upsert_chat
 
 log = logging.getLogger(__name__)
 
@@ -17,13 +22,9 @@ PRESENT_STATUSES = {ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR}
 ABSENT_STATUSES = {ChatMemberStatus.LEFT, ChatMemberStatus.KICKED}
 
 
-def _format_chat_line(title: str | None, chat_id: int, is_active: bool) -> str:
-    icon = "🟢" if is_active else "🔴"
-    name = title or f"chat {chat_id}"
-    return f"{icon} <b>{name}</b>\n   <code>{chat_id}</code>"
-
-
-@router.my_chat_member(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP, ChatType.CHANNEL}))
+@router.my_chat_member(
+    F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP, ChatType.CHANNEL})
+)
 async def on_my_chat_member(
     event: ChatMemberUpdated,
     bot: Bot,
@@ -70,7 +71,7 @@ async def on_my_chat_member(
             "✅ <b>Бот добавлен в чат</b>\n\n"
             f"📍 {chat.title or chat.id}\n"
             f"🆔 <code>{chat.id}</code>\n\n"
-            "Расписание ещё не настроено. Открой /chats, чтобы задать его."
+            "Открой /menu чтобы настроить расписание и текст призыва."
         )
     else:
         text = (
@@ -85,24 +86,6 @@ async def on_my_chat_member(
             await bot.send_message(admin_id, text)
         except Exception as exc:  # noqa: BLE001
             log.warning("notify admin %s failed: %s", admin_id, exc)
-
-
-@router.message(Command("chats"), F.chat.type == ChatType.PRIVATE)
-async def cmd_chats(message: Message, session: AsyncSession) -> None:
-    if message.from_user is None or not await is_admin(session, message.from_user.id):
-        return
-
-    chats = await list_chats(session)
-    if not chats:
-        await message.answer(
-            "📭 <b>Пока ни одного чата.</b>\n\n"
-            "Добавь меня в группу — она появится здесь автоматически."
-        )
-        return
-
-    lines = [_format_chat_line(c.title, c.chat_id, c.is_active) for c in chats]
-    body = "\n\n".join(lines)
-    await message.answer(f"<b>📋 Чаты бота</b>\n\n{body}")
 
 
 @router.message(Command("pause"), F.chat.type == ChatType.PRIVATE)
@@ -130,7 +113,7 @@ async def _toggle_chat_active(
         cmd = "resume" if active else "pause"
         await message.answer(
             f"Использование: <code>/{cmd} &lt;chat_id&gt;</code>\n"
-            "Список чатов — /chats"
+            "Удобнее через /menu → Чаты."
         )
         return
 
