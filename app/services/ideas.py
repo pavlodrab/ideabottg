@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.keyboards.prompt import owner_card_keyboard
 from app.models import Idea
-from app.services.admins import get_idea_recipients
+from app.services.admins import get_stream_recipients
 
 log = logging.getLogger(__name__)
 
@@ -152,7 +152,7 @@ async def dispatch_idea_to_admins(
 ) -> None:
     text = format_idea_card(idea, chat_title)
     keyboard = owner_card_keyboard(idea.id)
-    recipients = await get_idea_recipients(session)
+    recipients = await get_stream_recipients(session)
     for admin_id in recipients:
         try:
             await bot.send_message(admin_id, text, reply_markup=keyboard)

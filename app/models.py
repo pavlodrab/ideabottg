@@ -15,6 +15,15 @@ class Admin(Base):
     username: Mapped[str | None] = mapped_column(String(64), nullable=True)
     is_owner: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     receive_ideas: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    delivery_mode: Mapped[str] = mapped_column(
+        String(16), default="stream", nullable=False
+    )
+    digest_cron: Mapped[str] = mapped_column(
+        String(64), default="0 9 * * 1", nullable=False
+    )
+    last_digest_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

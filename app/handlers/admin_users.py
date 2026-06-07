@@ -111,11 +111,30 @@ def _admin_card_text(admin: Admin) -> str:
     role = "👑 Владелец" if admin.is_owner else "✅ Админ"
     name = f"@{admin.username}" if admin.username else f"id {admin.user_id}"
     bell = "🟢 Получает идеи" if admin.receive_ideas else "🔴 Не получает идеи"
+
+    if admin.delivery_mode == "digest":
+        from app.services.schedules import humanize_cron
+
+        sched = humanize_cron(admin.digest_cron)
+        last = (
+            admin.last_digest_at.strftime("%Y-%m-%d %H:%M")
+            if admin.last_digest_at
+            else "ещё не было"
+        )
+        mode_block = (
+            "📊 <b>Режим: дайджест</b>\n"
+            f"⏰ Когда: {sched}\n"
+            f"🕒 Последний: {last}"
+        )
+    else:
+        mode_block = "🔔 <b>Режим: поток</b>\n<i>каждая идея отдельным сообщением</i>"
+
     return (
         f"{role}\n"
         f"<b>{html.escape(name)}</b>\n"
         f"🆔 <code>{admin.user_id}</code>\n\n"
-        f"{bell}"
+        f"{bell}\n\n"
+        f"{mode_block}"
     )
 
 
@@ -269,3 +288,156 @@ async def receive_admin_user(
         await message.answer(
             f"ℹ️ <b>{html.escape(name)}</b> уже был админом."
         )
+
+
+
+
+# ---------- delivery mode ----------
+
+@router.callback_query(F.data.startswith("admin:mode:"))
+async def cb_admin_mode(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    scheduler=None,
+) -> None:
+    if callback.from_user is None:
+        await callback.answer()
+        return
+
+    parts = (callback.data or "").split(":")
+    if len(parts) != 4:
+        await callback.answer()
+        return
+    target_id = int(parts[2])
+    mode = parts[3]
+
+    # Only the admin themselves or the owner can change mode.
+    if callback.from_user.id != target_id:
+        if not await is_owner(session, callback.from_user.id):
+            await callback.answer(
+                "Менять можно только свой режим", show_alert=True
+            )
+            return
+
+    from app.services.admins import set_delivery_mode
+
+    admin = await set_delivery_mode(session, target_id, mode)
+    if admin is None:
+        await callback.answer("⚠️ Не получилось", show_alert=True)
+        return
+
+    if scheduler is not None:
+        await scheduler.sync_admin(target_id)
+
+    await callback.answer(
+        "📊 Дайджест включён" if mode == "digest" else "🔔 Поток включён"
+    )
+    await _show_admin_card(callback, session, target_id)
+
+
+@router.callback_query(F.data.startswith("admin:digest_sched:"))
+async def cb_admin_digest_sched(
+    callback: CallbackQuery, session: AsyncSession
+) -> None:
+    if callback.from_user is None:
+        await callback.answer()
+        return
+
+    target_id = int((callback.data or "").split(":")[2])
+    if callback.from_user.id != target_id and not await is_owner(
+        session, callback.from_user.id
+    ):
+        await callback.answer("Можно только своё", show_alert=True)
+        return
+
+    admin = await session.get(Admin, target_id)
+    if admin is None:
+        await callback.answer("⚠️ Не найден", show_alert=True)
+        return
+
+    from app.keyboards.menus import digest_schedule_keyboard
+    from app.services.schedules import humanize_cron
+
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text(
+            "⏰ <b>Расписание дайджеста</b>\n\n"
+            f"Сейчас: {humanize_cron(admin.digest_cron)}\n\n"
+            "Выбери шаблон 👇",
+            reply_markup=digest_schedule_keyboard(target_id),
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:digest_set:"))
+async def cb_admin_digest_set(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    scheduler=None,
+) -> None:
+    from app.keyboards.menus import DIGEST_PRESETS
+
+    if callback.from_user is None:
+        await callback.answer()
+        return
+
+    parts = (callback.data or "").split(":")
+    if len(parts) != 4:
+        await callback.answer()
+        return
+    target_id = int(parts[2])
+    preset_key = parts[3]
+
+    if callback.from_user.id != target_id and not await is_owner(
+        session, callback.from_user.id
+    ):
+        await callback.answer("Можно только своё", show_alert=True)
+        return
+
+    preset_map = {k: c for k, _, c in DIGEST_PRESETS}
+    cron = preset_map.get(preset_key)
+    if cron is None:
+        await callback.answer("⚠️ Шаблон не найден", show_alert=True)
+        return
+
+    from app.services.admins import set_digest_cron
+
+    admin = await set_digest_cron(session, target_id, cron)
+    if admin is None:
+        await callback.answer("⚠️ Не получилось", show_alert=True)
+        return
+
+    if scheduler is not None:
+        await scheduler.sync_admin(target_id)
+
+    await callback.answer("✅ Сохранено")
+    await _show_admin_card(callback, session, target_id)
+
+
+@router.callback_query(F.data.startswith("admin:digest_now:"))
+async def cb_admin_digest_now(
+    callback: CallbackQuery, bot: Bot, session: AsyncSession
+) -> None:
+    if callback.from_user is None:
+        await callback.answer()
+        return
+
+    target_id = int((callback.data or "").split(":")[2])
+
+    if callback.from_user.id != target_id and not await is_owner(
+        session, callback.from_user.id
+    ):
+        await callback.answer("Можно только себе", show_alert=True)
+        return
+
+    admin = await session.get(Admin, target_id)
+    if admin is None:
+        await callback.answer("⚠️ Не найден", show_alert=True)
+        return
+
+    from app.services.digest import send_digest_to_admin
+
+    delivered = await send_digest_to_admin(bot, session, admin)
+    await callback.answer(
+        "📤 Дайджест отправлен" if delivered else "📭 За период идей нет",
+    )
+    await _show_admin_card(callback, session, target_id)

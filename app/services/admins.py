@@ -87,3 +87,57 @@ async def toggle_receive_ideas(session: AsyncSession, user_id: int) -> Admin | N
     admin.receive_ideas = not admin.receive_ideas
     await session.commit()
     return admin
+
+
+
+
+async def get_stream_recipients(session: AsyncSession) -> list[int]:
+    """Admins who receive immediate idea cards (delivery_mode='stream')."""
+    result = await session.execute(
+        select(Admin.user_id).where(
+            Admin.receive_ideas.is_(True),
+            Admin.delivery_mode == "stream",
+        )
+    )
+    return [row[0] for row in result.all()]
+
+
+async def get_digest_admins(session: AsyncSession) -> list[Admin]:
+    """Admins who receive periodic digests (delivery_mode='digest')."""
+    result = await session.execute(
+        select(Admin).where(
+            Admin.receive_ideas.is_(True),
+            Admin.delivery_mode == "digest",
+        )
+    )
+    return list(result.scalars().all())
+
+
+async def set_delivery_mode(
+    session: AsyncSession, user_id: int, mode: str
+) -> Admin | None:
+    if mode not in {"stream", "digest"}:
+        return None
+    admin = await session.get(Admin, user_id)
+    if admin is None:
+        return None
+    admin.delivery_mode = mode
+    if mode == "digest" and admin.last_digest_at is None:
+        # Anchor the watermark so the first digest only covers ideas
+        # received from this point forward.
+        from datetime import datetime, timezone
+
+        admin.last_digest_at = datetime.now(timezone.utc)
+    await session.commit()
+    return admin
+
+
+async def set_digest_cron(
+    session: AsyncSession, user_id: int, cron: str
+) -> Admin | None:
+    admin = await session.get(Admin, user_id)
+    if admin is None:
+        return None
+    admin.digest_cron = cron
+    await session.commit()
+    return admin

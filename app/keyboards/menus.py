@@ -123,6 +123,38 @@ def admin_card_keyboard(
     rows.append(
         [InlineKeyboardButton(text=bell_label, callback_data=f"admin:toggle:{admin.user_id}")]
     )
+
+    if admin.delivery_mode == "stream":
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="📊 Перейти на дайджест",
+                    callback_data=f"admin:mode:{admin.user_id}:digest",
+                )
+            ]
+        )
+    else:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="🔔 Перейти на поток",
+                    callback_data=f"admin:mode:{admin.user_id}:stream",
+                ),
+                InlineKeyboardButton(
+                    text="📤 Отправить дайджест сейчас",
+                    callback_data=f"admin:digest_now:{admin.user_id}",
+                ),
+            ]
+        )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="⏰ Расписание дайджеста",
+                    callback_data=f"admin:digest_sched:{admin.user_id}",
+                )
+            ]
+        )
+
     if viewer_is_owner and not admin.is_owner:
         rows.append(
             [
@@ -133,6 +165,37 @@ def admin_card_keyboard(
             ]
         )
     rows.append([InlineKeyboardButton(text="⬅️ К списку", callback_data="admin:list")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+DIGEST_PRESETS: list[tuple[str, str, str]] = [
+    ("daily_09", "Каждый день 09:00", "0 9 * * *"),
+    ("daily_18", "Каждый день 18:00", "0 18 * * *"),
+    ("weekly_mon_09", "Понедельник 09:00", "0 9 * * 1"),
+    ("weekly_fri_18", "Пятница 18:00", "0 18 * * 5"),
+    ("weekly_sun_18", "Воскресенье 18:00", "0 18 * * 0"),
+]
+
+
+def digest_schedule_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for key, label, _ in DIGEST_PRESETS:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=label,
+                    callback_data=f"admin:digest_set:{user_id}:{key}",
+                )
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="⬅️ Назад",
+                callback_data=f"admin:open:{user_id}",
+            )
+        ]
+    )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
