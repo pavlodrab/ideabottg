@@ -44,7 +44,19 @@ The bot can be silenced during night hours so it does not post scheduled
 prompts or other proactive messages while everyone is asleep. Direct
 replies to user commands always work, regardless of the time.
 
-Configure via env vars (defaults shown):
+**Configure from the bot.** Send `/quiet` to the bot in private chat
+(admin-only). The panel lets an admin:
+
+- toggle the whole feature on/off,
+- pick a quick preset (`23:00 → 08:00`, `22:00 → 09:00`, `00:00 →
+  07:00`, `21:00 → 09:00`),
+- enter a custom window in `HH:MM-HH:MM` form.
+
+Live values are persisted in the `settings` key-value table, so they
+survive restarts and don't need a redeploy.
+
+The env vars below are only used as **initial defaults** — they seed
+the values on the very first run when the table rows are absent:
 
 ```env
 QUIET_HOURS_ENABLED=true
@@ -53,7 +65,7 @@ QUIET_HOURS_END=08:00
 ```
 
 Times are `HH:MM` interpreted in `TZ`. The window may wrap midnight
-(`23:00 → 08:00`). Set `QUIET_HOURS_ENABLED=false` to disable entirely.
+(`23:00 → 08:00` = quiet from 23:00 until 08:00 next day).
 
 Scheduled jobs and any future broadcast code should gate proactive sends
 through `app.services.quiet_hours.should_send_proactive()`.
