@@ -30,6 +30,13 @@ class Settings(BaseSettings):
     tz: str = "Europe/Kyiv"
     log_level: str = "INFO"
 
+    # Optional Redis URL for persistent FSM storage. When unset (e.g. in
+    # local dev), the bot falls back to in-memory storage which is fine
+    # for testing but loses every active FSM state on each restart —
+    # that breaks any "click button → bot asks for input → user replies"
+    # flow whenever Railway redeploys between the click and the reply.
+    redis_url: str | None = None
+
     # Quiet hours / night mode. Bot suppresses *proactive* messages
     # (scheduled prompts, broadcasts, reminders) during this window.
     # Times are HH:MM in the timezone above; window may wrap midnight.

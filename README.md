@@ -34,8 +34,11 @@ python main.py
 
 1. Create a new Railway project, add a Postgres plugin.
    `DATABASE_URL` will be injected automatically.
-2. Set `BOT_TOKEN` and `OWNER_ID` env vars in the service settings.
-3. Deploy from this repo. Railway will use Nixpacks (Python is detected
+2. Add a Redis plugin too — `REDIS_URL` will be injected. Without it
+   the bot still runs but FSM state is lost on every restart, breaking
+   multi-step admin flows (custom prompt text, custom cron, etc.).
+3. Set `BOT_TOKEN` and `OWNER_ID` env vars in the service settings.
+4. Deploy from this repo. Railway will use Nixpacks (Python is detected
    via `requirements.txt` + `runtime.txt`) and run the `startCommand`
    from `railway.toml` (migrations, then `python main.py`).
 
