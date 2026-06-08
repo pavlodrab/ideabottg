@@ -56,6 +56,8 @@ async def create_idea(
     text: str,
     is_anonymous: bool,
     tag: str = DEFAULT_TAG,
+    from_chat_id: Optional[int] = None,
+    from_message_id: Optional[int] = None,
 ) -> Idea:
     idea = Idea(
         chat_id=chat_id,
@@ -64,6 +66,8 @@ async def create_idea(
         text=text,
         is_anonymous=is_anonymous,
         tag=tag if tag in TAGS_BY_KEY else DEFAULT_TAG,
+        from_chat_id=from_chat_id,
+        from_message_id=from_message_id,
     )
     session.add(idea)
     await session.commit()
