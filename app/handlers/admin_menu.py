@@ -392,7 +392,7 @@ async def cb_prompt_open(
 async def receive_prompt_text(
     message: Message, state: FSMContext, session: AsyncSession
 ) -> None:
-    text = (message.text_html or message.text or "").strip()
+    text = (message.html_text or message.text or "").strip()
     if text.startswith("/"):
         return
     if len(text) < 5:

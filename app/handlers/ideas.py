@@ -382,7 +382,7 @@ async def _start_reply_flow(
 async def receive_reply_text(
     message: Message, state: FSMContext, bot: Bot, session: AsyncSession
 ) -> None:
-    text = (message.text_html or message.text or "").strip()
+    text = (message.html_text or message.text or "").strip()
     if text.startswith("/"):
         return
     if len(text) < 1:
