@@ -20,6 +20,7 @@ async def cmd_start(message: Message, session: AsyncSession) -> None:
             "• /menu — главное меню\n"
             "• /chats — список чатов и настройки\n"
             "• /admins — управление админами\n"
+            "• /quiet — ночной режим (тишина)\n"
             "• /help — справка"
         )
         return
@@ -48,7 +49,8 @@ async def cmd_help(message: Message, session: AsyncSession) -> None:
         "• /menu — главное меню\n"
         "• /chats — чаты и их настройки\n"
         "• /ideas — все идеи с фильтрами\n"
-        "• /admins — управление админами\n\n"
+        "• /admins — управление админами\n"
+        "• /quiet — ночной режим (тишина)\n\n"
         "<b>Шорткаты</b>\n"
         "• /pause &lt;chat_id&gt; — пауза\n"
         "• /resume &lt;chat_id&gt; — снова активен\n"

@@ -41,11 +41,24 @@ python main.py
 
 ## Quiet hours (night mode)
 
-The bot can be silenced during night hours so it does not post scheduled
-prompts or other proactive messages while everyone is asleep. Direct
-replies to user commands always work, regardless of the time.
+To avoid pinging chats and admins at night, the bot suppresses all
+*scheduled* messages — prompt posts and admin digests — while the
+current time (in `TZ`) falls inside the configured window. Replies to
+direct user commands are not affected.
 
-Configure via env vars (defaults shown):
+**Configure from the bot.** Open `/menu` → "🌙 Тишина" or send `/quiet`
+directly. From there an admin can:
+
+- toggle the whole feature on/off,
+- pick a quick preset (`23:00 → 08:00`, `22:00 → 09:00`, `00:00 →
+  07:00`, `21:00 → 09:00`),
+- enter a custom window in `HH:MM-HH:MM` form.
+
+Live values are persisted in the `settings` key-value table, so they
+survive restarts and don't need a redeploy.
+
+The env vars below are only used as **initial defaults** — they seed
+the values on the very first run when the table is empty:
 
 ```env
 QUIET_HOURS_ENABLED=true
@@ -53,11 +66,13 @@ QUIET_HOURS_START=23:00
 QUIET_HOURS_END=08:00
 ```
 
-Times are `HH:MM` interpreted in `TZ`. The window may wrap midnight
-(`23:00 → 08:00`). Set `QUIET_HOURS_ENABLED=false` to disable entirely.
+The window may wrap midnight (`23:00 → 08:00` = quiet from 23:00 until
+08:00 next day).
 
-Scheduled jobs and any future broadcast code should gate proactive sends
-through `app.services.quiet_hours.should_send_proactive()`.
+Implementation note: cron jobs still fire on schedule; the quiet-hours
+gate just makes the job exit early with a log line. Digest watermarks
+(`last_digest_at`) are *not* advanced when a fire is skipped, so the
+next non-quiet run covers the skipped window.
 
 ## Project layout
 

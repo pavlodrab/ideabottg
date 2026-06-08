@@ -21,3 +21,7 @@ class AdminAdd(StatesGroup):
 
 class AdminReply(StatesGroup):
     waiting_text = State()
+
+
+class QuietHoursEdit(StatesGroup):
+    waiting_window = State()

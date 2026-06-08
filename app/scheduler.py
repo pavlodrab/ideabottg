@@ -12,6 +12,7 @@ from app.db import SessionLocal
 from app.models import Admin, Chat
 from app.services.digest import send_digest_to_admin
 from app.services.prompts import send_prompt_to_chat
+from app.services.quiet_hours import should_send_proactive
 
 log = logging.getLogger(__name__)
 
@@ -112,6 +113,9 @@ class IdeaScheduler:
         log.info("scheduled prompt chat_id=%s with cron=%r", chat_id, cron)
 
     async def _send_prompt(self, chat_id: int) -> None:
+        if not should_send_proactive():
+            log.info("quiet hours: skipping prompt chat_id=%s", chat_id)
+            return
         async with SessionLocal() as session:
             chat = await session.get(Chat, chat_id)
             if chat is None:
@@ -165,6 +169,11 @@ class IdeaScheduler:
         log.info("scheduled digest user_id=%s with cron=%r", user_id, cron)
 
     async def _send_digest(self, user_id: int) -> None:
+        if not should_send_proactive():
+            # Skip without advancing the watermark — the next fire that
+            # lands outside quiet hours will cover the missed window.
+            log.info("quiet hours: skipping digest user_id=%s", user_id)
+            return
         async with SessionLocal() as session:
             admin = await session.get(Admin, user_id)
             if admin is None or admin.delivery_mode != "digest":
