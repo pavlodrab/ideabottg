@@ -11,7 +11,7 @@ forwards submitted ideas privately to the bot owners (admins).
 - SQLAlchemy 2 (async) + Postgres
 - Alembic for migrations
 - APScheduler for prompt scheduling
-- Deployed on Railway via Docker
+- Deployed on Railway (Nixpacks, no Docker)
 
 ## Local setup
 
@@ -27,7 +27,7 @@ pip install -r requirements.txt
 alembic revision --autogenerate -m "init"
 alembic upgrade head
 
-python -m app.main
+python main.py
 ```
 
 ## Railway deployment
@@ -35,8 +35,9 @@ python -m app.main
 1. Create a new Railway project, add a Postgres plugin.
    `DATABASE_URL` will be injected automatically.
 2. Set `BOT_TOKEN` and `OWNER_ID` env vars in the service settings.
-3. Deploy from this repo. Railway will use the `Dockerfile` and the
-   `startCommand` from `railway.toml` (runs migrations, then the bot).
+3. Deploy from this repo. Railway will use Nixpacks (Python is detected
+   via `requirements.txt` + `runtime.txt`) and run the `startCommand`
+   from `railway.toml` (migrations, then `python main.py`).
 
 ## Project layout
 
