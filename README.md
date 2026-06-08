@@ -38,6 +38,26 @@ python -m app.main
 3. Deploy from this repo. Railway will use the `Dockerfile` and the
    `startCommand` from `railway.toml` (runs migrations, then the bot).
 
+## Quiet hours (night mode)
+
+The bot can be silenced during night hours so it does not post scheduled
+prompts or other proactive messages while everyone is asleep. Direct
+replies to user commands always work, regardless of the time.
+
+Configure via env vars (defaults shown):
+
+```env
+QUIET_HOURS_ENABLED=true
+QUIET_HOURS_START=23:00
+QUIET_HOURS_END=08:00
+```
+
+Times are `HH:MM` interpreted in `TZ`. The window may wrap midnight
+(`23:00 → 08:00`). Set `QUIET_HOURS_ENABLED=false` to disable entirely.
+
+Scheduled jobs and any future broadcast code should gate proactive sends
+through `app.services.quiet_hours.should_send_proactive()`.
+
 ## Project layout
 
 See `app/` for handlers, services, and database models.

@@ -15,6 +15,13 @@ class Settings(BaseSettings):
     tz: str = Field(default="Europe/Kyiv", alias="TZ")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
+    # Quiet hours / night mode. Bot suppresses *proactive* messages
+    # (scheduled prompts, broadcasts, reminders) during this window.
+    # Times are HH:MM in the timezone above; window may wrap midnight.
+    quiet_hours_enabled: bool = Field(default=True, alias="QUIET_HOURS_ENABLED")
+    quiet_hours_start: str = Field(default="23:00", alias="QUIET_HOURS_START")
+    quiet_hours_end: str = Field(default="08:00", alias="QUIET_HOURS_END")
+
     @property
     def async_database_url(self) -> str:
         # Railway gives postgres://, SQLAlchemy async needs postgresql+asyncpg://
