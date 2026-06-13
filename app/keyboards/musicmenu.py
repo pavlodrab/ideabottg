@@ -103,6 +103,12 @@ def musicmenu_home_keyboard(
         ],
         [
             InlineKeyboardButton(
+                text="🎵 Сгенерировать песню дня",
+                callback_data="mm:gen_pick",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
                 text="🎵 Архив песен",
                 callback_data="mm:archive",
             ),

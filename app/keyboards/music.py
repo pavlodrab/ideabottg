@@ -149,6 +149,18 @@ def music_menu_keyboard(
         ]
     )
 
+    # Generate-song-now button. The whole point of /musicmenu in a
+    # group is to control how that chat's song-of-the-day comes out;
+    # firing one off on demand belongs in the same screen.
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="🎵 Сгенерировать песню сейчас",
+                callback_data=f"music:gen_now:{chat_id}",
+            )
+        ]
+    )
+
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

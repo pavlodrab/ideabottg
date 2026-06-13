@@ -21,7 +21,6 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db import SessionLocal
 from app.keyboards.suno import (
     suno_back_keyboard,
     suno_duration_keyboard,
@@ -30,7 +29,7 @@ from app.keyboards.suno import (
     suno_remove_key_confirm_keyboard,
 )
 from app.services.admins import is_admin
-from app.services.songs import set_tg_file_id, upsert_song
+from app.services.song_pipeline import watch_suno_task
 from app.services.suno import (
     DEFAULT_CALLBACK_URL,
     DURATION_PRESETS_SEC,
@@ -40,7 +39,6 @@ from app.services.suno import (
     SUPPORTED_MODELS,
     SunoApiError,
     SunoApiOrgClient,
-    TaskSnapshot,
     append_duration_hint,
     clear_api_key,
     format_duration_label,
@@ -552,19 +550,25 @@ async def receive_test_prompt(
     )
 
     asyncio.create_task(
-        _watch_task(
+        watch_suno_task(
             bot=bot,
             api_key=api_key,
             task_id=task_id,
-            notify_chat_id=sent.chat.id,
-            notify_message_id=sent.message_id,
+            placeholder_chat_id=sent.chat.id,
+            placeholder_message_id=sent.message_id,
+            audio_chat_id=sent.chat.id,
             requested_by=message.from_user.id if message.from_user else None,
-            model=model,
+            suno_model=model,
             prompt=final_prompt,
         ),
         name=f"suno-watch:{task_id}",
     )
 
+
+# ----- legacy alias kept for any external callers -----
+# (Tests / external scripts occasionally import private helpers. The
+# real implementation moved to ``app.services.song_pipeline`` so the
+# daily-song flow can re-use it.)
 
 async def _watch_task(
     *,
@@ -577,176 +581,17 @@ async def _watch_task(
     model: str,
     prompt: str,
 ) -> None:
-    """Background poller: polls Suno every TEST_GEN_POLL_INTERVAL_SEC,
-    edits the placeholder and (on success) persists a ``Song`` row +
-    delivers the mp3 to the user.
-
-    Persisting happens in a fresh ``SessionLocal()`` because this runs
-    outside the request lifecycle — middleware-injected sessions only
-    live for the duration of the originating handler.
-    """
-    client = SunoApiOrgClient(api_key)
-    deadline = TEST_GEN_TIMEOUT_SEC
-    elapsed = 0
-    last_snapshot: TaskSnapshot | None = None
-
-    while elapsed < deadline:
-        await asyncio.sleep(TEST_GEN_POLL_INTERVAL_SEC)
-        elapsed += TEST_GEN_POLL_INTERVAL_SEC
-
-        try:
-            snapshot = await client.get_task(task_id)
-        except SunoApiError as exc:
-            log.warning("suno watch %s poll error: %s", task_id, exc)
-            continue
-        except Exception as exc:  # noqa: BLE001
-            log.exception("suno watch %s unexpected: %s", task_id, exc)
-            continue
-
-        last_snapshot = snapshot
-
-        if snapshot.is_terminal:
-            await _handle_terminal(
-                bot,
-                notify_chat_id,
-                notify_message_id,
-                task_id,
-                snapshot,
-                requested_by=requested_by,
-                model=model,
-                prompt=prompt,
-            )
-            return
-
-    # Timed out.
-    msg = (
-        f"⏰ <b>Тайм-аут.</b> Задача всё ещё не готова за "
-        f"{TEST_GEN_TIMEOUT_SEC // 60} минут.\n\n"
-        f"🆔 <code>{html.escape(task_id)}</code>\n"
-        f"📊 Последний статус: <code>"
-        f"{html.escape(last_snapshot.status if last_snapshot else 'неизвестно')}"
-        f"</code>\n\n"
-        f"Можно подождать и проверить руками:\n"
-        f"<code>/suno_status {html.escape(task_id)}</code>"
+    await watch_suno_task(
+        bot=bot,
+        api_key=api_key,
+        task_id=task_id,
+        placeholder_chat_id=notify_chat_id,
+        placeholder_message_id=notify_message_id,
+        audio_chat_id=notify_chat_id,
+        requested_by=requested_by,
+        suno_model=model,
+        prompt=prompt,
     )
-    with contextlib.suppress(Exception):
-        await bot.edit_message_text(
-            msg, chat_id=notify_chat_id, message_id=notify_message_id
-        )
-
-
-async def _handle_terminal(
-    bot: Bot,
-    chat_id: int,
-    message_id: int,
-    task_id: str,
-    snapshot: TaskSnapshot,
-    *,
-    requested_by: int | None,
-    model: str,
-    prompt: str,
-) -> None:
-    """Edit the placeholder, persist a ``Song`` row on success, and
-    deliver the mp3. On first ``send_audio`` we capture Telegram's
-    permanent ``file_id`` so the song stays playable from /musiclist
-    long after Suno's 15-day mp3 retention expires.
-    """
-    if snapshot.is_success:
-        # 1. Persist Song row first (so /musiclist can find it even if
-        # the audio delivery below fails for any reason).
-        song_id: int | None = None
-        try:
-            async with SessionLocal() as session:
-                song = await upsert_song(
-                    session,
-                    suno_task_id=task_id,
-                    model=model,
-                    prompt=prompt,
-                    title=snapshot.title,
-                    audio_url=snapshot.audio_url,
-                    stream_url=snapshot.stream_url,
-                    image_url=snapshot.image_url,
-                    duration=snapshot.duration,
-                    requested_by=requested_by,
-                    status="success",
-                )
-                song_id = song.id
-        except Exception:  # noqa: BLE001
-            log.exception("persist song for task %s failed", task_id)
-
-        # 2. Edit the placeholder card.
-        title = snapshot.title or "(без названия)"
-        duration = (
-            f" · {snapshot.duration:.0f} сек"
-            if snapshot.duration is not None
-            else ""
-        )
-        edited = (
-            "✅ <b>Готово!</b>\n\n"
-            f"🎵 <b>{html.escape(title)}</b>{duration}\n"
-            f"🆔 <code>{html.escape(task_id)}</code>\n\n"
-            "ℹ️ Файл хранится на серверах Suno <b>15 дней</b>.\n"
-            "После первого проигрывания через бота он навсегда "
-            "сохраняется в Telegram — найти его можно через /musiclist."
-        )
-        with contextlib.suppress(Exception):
-            await bot.edit_message_text(
-                edited, chat_id=chat_id, message_id=message_id
-            )
-
-        # 3. Deliver the mp3 + capture Telegram's file_id on success.
-        if snapshot.audio_url:
-            try:
-                sent_audio = await bot.send_audio(
-                    chat_id,
-                    audio=snapshot.audio_url,
-                    title=title,
-                    performer="Suno",
-                    caption=f"🎵 {html.escape(title)}",
-                )
-            except Exception as exc:  # noqa: BLE001
-                log.warning("send_audio for task %s failed: %s", task_id, exc)
-                with contextlib.suppress(Exception):
-                    await bot.send_message(
-                        chat_id,
-                        f"🔗 <a href=\"{html.escape(snapshot.audio_url)}\">"
-                        "Скачать mp3</a>",
-                        disable_web_page_preview=False,
-                    )
-                return
-
-            # Persist Telegram's permanent file_id so /musiclist can
-            # re-deliver this track via Telegram even after Suno's
-            # 15-day URL retention expires.
-            if (
-                song_id is not None
-                and sent_audio
-                and sent_audio.audio
-            ):
-                try:
-                    async with SessionLocal() as session:
-                        await set_tg_file_id(
-                            session, song_id, sent_audio.audio.file_id
-                        )
-                except Exception:  # noqa: BLE001
-                    log.exception(
-                        "capture tg_audio_file_id for song %s failed",
-                        song_id,
-                    )
-        return
-
-    # Terminal but not success — show errorMessage from API if present.
-    reason = snapshot.error_message or snapshot.status
-    edited = (
-        "❌ <b>Suno вернул ошибку.</b>\n\n"
-        f"🆔 <code>{html.escape(task_id)}</code>\n"
-        f"📊 Статус: <code>{html.escape(snapshot.status)}</code>\n"
-        f"💬 Причина: {html.escape(reason)}"
-    )
-    with contextlib.suppress(Exception):
-        await bot.edit_message_text(
-            edited, chat_id=chat_id, message_id=message_id
-        )
 
 
 @router.message(Command("suno_status"), F.chat.type == ChatType.PRIVATE)
