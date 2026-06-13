@@ -1,0 +1,605 @@
+"""Suno API admin UI: API-key, model, credits, test generation.
+
+All settings are stored in the `settings` table (DB-backed) so the bot
+owner configures everything from inside Telegram — no env vars, no
+redeploy. See `app/services/suno.py` for the keys.
+
+Callback-data namespace: `suno:*` (does not collide with existing
+`chat:*` / `sched:*` / `prompt:*` / `card:*` / `admin:*` / etc).
+"""
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import html
+import logging
+
+from aiogram import Bot, F, Router
+from aiogram.enums import ChatType
+from aiogram.filters import Command, CommandObject
+from aiogram.fsm.context import FSMContext
+from aiogram.types import CallbackQuery, Message
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.keyboards.suno import (
+    suno_back_keyboard,
+    suno_menu_keyboard,
+    suno_model_keyboard,
+    suno_remove_key_confirm_keyboard,
+)
+from app.services.admins import is_admin
+from app.services.suno import (
+    DEFAULT_CALLBACK_URL,
+    MODEL_LABELS,
+    SUPPORTED_MODELS,
+    SunoApiError,
+    SunoApiOrgClient,
+    TaskSnapshot,
+    clear_api_key,
+    get_api_key,
+    get_callback_url,
+    get_model,
+    mask_key,
+    set_api_key,
+    set_model,
+)
+from app.states import SunoApiKeyEditing, SunoTestPrompt
+
+log = logging.getLogger(__name__)
+
+router = Router(name="suno_admin")
+
+# How long we will wait for a generation task to finish before giving up
+# the background poller. The Suno docs say full mp3 takes 2-3 minutes;
+# we give it a generous ceiling and edit the chat message when ready.
+TEST_GEN_TIMEOUT_SEC = 360
+TEST_GEN_POLL_INTERVAL_SEC = 15
+PROMPT_MAX_LEN = 500  # non-custom mode limit per Suno docs
+
+
+# ---------- gating ----------
+
+async def _require_admin(
+    cb_or_msg: CallbackQuery | Message, session: AsyncSession
+) -> bool:
+    user = cb_or_msg.from_user
+    if user is None or not await is_admin(session, user.id):
+        if isinstance(cb_or_msg, CallbackQuery):
+            await cb_or_msg.answer("Только для админов", show_alert=True)
+        return False
+    return True
+
+
+# ---------- entry: /suno + suno:home ----------
+
+@router.message(Command("suno"), F.chat.type == ChatType.PRIVATE)
+async def cmd_suno(message: Message, session: AsyncSession) -> None:
+    if not await _require_admin(message, session):
+        return
+    text, kb = await _build_menu(session)
+    await message.answer(text, reply_markup=kb)
+
+
+@router.callback_query(F.data == "suno:home")
+async def cb_suno_home(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
+    if not await _require_admin(callback, session):
+        return
+    await state.clear()
+    text, kb = await _build_menu(session)
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer()
+
+
+async def _build_menu(session: AsyncSession) -> tuple[str, object]:
+    api_key = await get_api_key(session)
+    model = await get_model(session)
+    callback_url = await get_callback_url(session)
+
+    masked = mask_key(api_key)
+    if api_key:
+        status_line = f"🟢 <b>API-ключ задан</b> · <code>{html.escape(masked)}</code>"
+        hint = (
+            "Открой «🧪 Тестовая генерация», чтобы прогнать пайплайн на одной "
+            "короткой подсказке и убедиться, что всё работает."
+        )
+    else:
+        status_line = "🔴 <b>API-ключ не задан</b>"
+        hint = (
+            "Возьми ключ на <a href=\"https://sunoapi.org/api-key\">"
+            "sunoapi.org/api-key</a> и нажми «🔑 Задать API-ключ»."
+        )
+
+    text = (
+        "🎵 <b>Suno API</b>  · <code>sunoapi.org</code>\n\n"
+        f"{status_line}\n"
+        f"🎚 Модель по умолчанию: <code>{html.escape(model)}</code>\n"
+        f"🔁 Callback URL: <code>{html.escape(callback_url)}</code>\n\n"
+        f"{hint}"
+    )
+    kb = suno_menu_keyboard(
+        has_api_key=bool(api_key),
+        current_model=model,
+    )
+    return text, kb
+
+
+# ---------- API key: set ----------
+
+@router.callback_query(F.data == "suno:set_key")
+async def cb_suno_set_key(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
+    if not await _require_admin(callback, session):
+        return
+    await state.set_state(SunoApiKeyEditing.waiting_key)
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text(
+            "🔑 <b>API-ключ Suno</b>\n\n"
+            "Пришли ключ одним сообщением. Получить ключ можно тут:\n"
+            "<a href=\"https://sunoapi.org/api-key\">"
+            "sunoapi.org/api-key</a>\n\n"
+            "Я сразу проверю его звонком к API (запросом баланса) и "
+            "удалю это сообщение из истории, чтобы ключ не светился.\n\n"
+            "Или /cancel.",
+            reply_markup=suno_back_keyboard(),
+            disable_web_page_preview=True,
+        )
+    await callback.answer()
+
+
+@router.message(
+    SunoApiKeyEditing.waiting_key, F.chat.type == ChatType.PRIVATE, F.text
+)
+async def receive_api_key(
+    message: Message, state: FSMContext, session: AsyncSession
+) -> None:
+    raw = (message.text or "").strip()
+    if raw.startswith("/"):
+        return  # let /cancel and other commands fall through
+
+    # Try to delete the user's message so the key doesn't linger in history.
+    with contextlib.suppress(Exception):
+        await message.delete()
+
+    if len(raw) < 8:
+        await message.answer(
+            "⚠️ Слишком короткий ключ. Перепроверь и пришли ещё раз, или /cancel.",
+            reply_markup=suno_back_keyboard(),
+        )
+        return
+
+    # Validate by hitting /api/v1/generate/credit. If the call fails we do
+    # NOT save the key — better to surface a clear error than silently store
+    # a bad value.
+    client = SunoApiOrgClient(raw)
+    try:
+        credits = await client.get_credits()
+    except SunoApiError as exc:
+        await message.answer(
+            "❌ <b>Ключ не принят Suno API.</b>\n\n"
+            f"Ответ: <code>{html.escape(str(exc))}</code>\n\n"
+            "Перепроверь ключ на "
+            "<a href=\"https://sunoapi.org/api-key\">sunoapi.org/api-key</a> "
+            "и попробуй ещё раз. Или /cancel.",
+            reply_markup=suno_back_keyboard(),
+            disable_web_page_preview=True,
+        )
+        return
+    except Exception as exc:  # noqa: BLE001
+        log.exception("unexpected error validating suno key")
+        await message.answer(
+            f"❌ Не получилось проверить ключ: <code>{html.escape(str(exc))}</code>\n\n"
+            "Попробуй ещё раз или /cancel.",
+            reply_markup=suno_back_keyboard(),
+        )
+        return
+
+    await set_api_key(session, raw)
+    await state.clear()
+
+    text, kb = await _build_menu(session)
+    await message.answer(
+        f"✅ <b>API-ключ сохранён.</b>\n"
+        f"💰 Текущий баланс: <b>{credits}</b> кредитов\n\n" + text,
+        reply_markup=kb,
+        disable_web_page_preview=True,
+    )
+
+
+# ---------- API key: remove ----------
+
+@router.callback_query(F.data == "suno:remove_key")
+async def cb_suno_remove_key(
+    callback: CallbackQuery, session: AsyncSession
+) -> None:
+    if not await _require_admin(callback, session):
+        return
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text(
+            "🗑 <b>Удалить API-ключ?</b>\n\n"
+            "После удаления тестовая генерация и расчёт кредитов перестанут "
+            "работать, пока не задашь ключ снова.",
+            reply_markup=suno_remove_key_confirm_keyboard(),
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "suno:remove_key_yes")
+async def cb_suno_remove_key_yes(
+    callback: CallbackQuery, session: AsyncSession
+) -> None:
+    if not await _require_admin(callback, session):
+        return
+    removed = await clear_api_key(session)
+    await callback.answer("🗑 Удалён" if removed else "Уже удалён")
+    if isinstance(callback.message, Message):
+        text, kb = await _build_menu(session)
+        await callback.message.edit_text(text, reply_markup=kb)
+
+
+# ---------- credits ----------
+
+@router.callback_query(F.data == "suno:credits")
+async def cb_suno_credits(
+    callback: CallbackQuery, session: AsyncSession
+) -> None:
+    if not await _require_admin(callback, session):
+        return
+    api_key = await get_api_key(session)
+    if not api_key:
+        await callback.answer("Сначала задай API-ключ", show_alert=True)
+        return
+
+    client = SunoApiOrgClient(api_key)
+    try:
+        credits = await client.get_credits()
+    except SunoApiError as exc:
+        await callback.answer(
+            f"⚠️ Suno: {exc}", show_alert=True
+        )
+        return
+
+    await callback.answer(f"💰 Кредитов: {credits}", show_alert=True)
+
+
+@router.message(Command("suno_credits"), F.chat.type == ChatType.PRIVATE)
+async def cmd_suno_credits(message: Message, session: AsyncSession) -> None:
+    if not await _require_admin(message, session):
+        return
+    api_key = await get_api_key(session)
+    if not api_key:
+        await message.answer(
+            "🔴 API-ключ не задан. Открой /suno и задай ключ."
+        )
+        return
+    client = SunoApiOrgClient(api_key)
+    try:
+        credits = await client.get_credits()
+    except SunoApiError as exc:
+        await message.answer(f"⚠️ Suno API ответил: <code>{html.escape(str(exc))}</code>")
+        return
+    await message.answer(f"💰 Остаток кредитов: <b>{credits}</b>")
+
+
+# ---------- model picker ----------
+
+@router.callback_query(F.data == "suno:model_open")
+async def cb_suno_model_open(
+    callback: CallbackQuery, session: AsyncSession
+) -> None:
+    if not await _require_admin(callback, session):
+        return
+    current = await get_model(session)
+    if isinstance(callback.message, Message):
+        lines = [
+            "🎚 <b>Модель Suno по умолчанию</b>\n",
+            f"Сейчас: <code>{html.escape(current)}</code>\n",
+            "Выбери модель ниже. Она будет использоваться для всех "
+            "запросов из этого бота — и для тестовой генерации, и для "
+            "будущей фичи «Песня дня».",
+        ]
+        await callback.message.edit_text(
+            "\n".join(lines), reply_markup=suno_model_keyboard(current)
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("suno:model_set:"))
+async def cb_suno_model_set(
+    callback: CallbackQuery, session: AsyncSession
+) -> None:
+    if not await _require_admin(callback, session):
+        return
+    parts = (callback.data or "").split(":", 2)
+    if len(parts) != 3:
+        await callback.answer()
+        return
+    slug = parts[2]
+    if slug not in SUPPORTED_MODELS:
+        await callback.answer("⚠️ Неизвестная модель", show_alert=True)
+        return
+    await set_model(session, slug)
+    await callback.answer(f"✅ {MODEL_LABELS.get(slug, slug)}")
+    text, kb = await _build_menu(session)
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text(text, reply_markup=kb)
+
+
+# ---------- test generation ----------
+
+@router.callback_query(F.data == "suno:gen_open")
+async def cb_suno_gen_open(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
+    if not await _require_admin(callback, session):
+        return
+    api_key = await get_api_key(session)
+    if not api_key:
+        await callback.answer("Сначала задай API-ключ", show_alert=True)
+        return
+
+    await state.set_state(SunoTestPrompt.waiting_prompt)
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text(
+            "🧪 <b>Тестовая генерация</b>\n\n"
+            f"Пришли короткое описание того, что должно играть "
+            f"(до {PROMPT_MAX_LEN} символов). Лирика будет сгенерирована "
+            "автоматически на основе описания.\n\n"
+            "Примеры:\n"
+            "• <code>A short relaxing piano tune</code>\n"
+            "• <code>уютная гитара, дождь за окном, вечер</code>\n"
+            "• <code>energetic synthwave with a driving beat</code>\n\n"
+            "Я отправлю задачу в Suno и пришлю ссылку на mp3, как только "
+            "она будет готова (обычно 2–3 минуты).\n\n"
+            "Или /cancel.",
+            reply_markup=suno_back_keyboard(),
+        )
+    await callback.answer()
+
+
+@router.message(
+    SunoTestPrompt.waiting_prompt, F.chat.type == ChatType.PRIVATE, F.text
+)
+async def receive_test_prompt(
+    message: Message, state: FSMContext, session: AsyncSession, bot: Bot
+) -> None:
+    text = (message.text or "").strip()
+    if text.startswith("/"):
+        return
+    if len(text) < 5:
+        await message.answer(
+            "Слишком коротко. Хотя бы пара слов нужна. Или /cancel."
+        )
+        return
+    if len(text) > PROMPT_MAX_LEN:
+        await message.answer(
+            f"⚠️ Слишком длинно — лимит {PROMPT_MAX_LEN} символов. Обрежь и пришли ещё раз."
+        )
+        return
+
+    api_key = await get_api_key(session)
+    if not api_key:
+        await state.clear()
+        await message.answer(
+            "🔴 API-ключ пропал. Открой /suno и задай его снова."
+        )
+        return
+
+    model = await get_model(session)
+    callback_url = await get_callback_url(session)
+
+    client = SunoApiOrgClient(api_key)
+    try:
+        task_id = await client.generate_music(
+            prompt=text,
+            model=model,
+            callback_url=callback_url,
+            custom_mode=False,
+            instrumental=False,
+        )
+    except SunoApiError as exc:
+        await state.clear()
+        await message.answer(
+            "❌ Suno отклонил задачу: "
+            f"<code>{html.escape(str(exc))}</code>"
+        )
+        return
+
+    await state.clear()
+
+    sent = await message.answer(
+        "🎵 <b>Задача отправлена</b>\n\n"
+        f"🆔 <code>{html.escape(task_id)}</code>\n"
+        f"🎚 Модель: <code>{html.escape(model)}</code>\n"
+        "⏳ Жду готовности (обычно 2–3 минуты)…\n\n"
+        "Можно в любой момент проверить вручную:\n"
+        f"<code>/suno_status {html.escape(task_id)}</code>"
+    )
+
+    asyncio.create_task(
+        _watch_task(
+            bot=bot,
+            api_key=api_key,
+            task_id=task_id,
+            chat_id=sent.chat.id,
+            message_id=sent.message_id,
+        ),
+        name=f"suno-watch:{task_id}",
+    )
+
+
+async def _watch_task(
+    *,
+    bot: Bot,
+    api_key: str,
+    task_id: str,
+    chat_id: int,
+    message_id: int,
+) -> None:
+    """Background poller: polls Suno every TEST_GEN_POLL_INTERVAL_SEC and
+    edits the original chat message when the task reaches a terminal
+    state or the timeout expires."""
+    client = SunoApiOrgClient(api_key)
+    deadline = TEST_GEN_TIMEOUT_SEC
+    elapsed = 0
+    last_snapshot: TaskSnapshot | None = None
+
+    while elapsed < deadline:
+        await asyncio.sleep(TEST_GEN_POLL_INTERVAL_SEC)
+        elapsed += TEST_GEN_POLL_INTERVAL_SEC
+
+        try:
+            snapshot = await client.get_task(task_id)
+        except SunoApiError as exc:
+            log.warning("suno watch %s poll error: %s", task_id, exc)
+            continue
+        except Exception as exc:  # noqa: BLE001
+            log.exception("suno watch %s unexpected: %s", task_id, exc)
+            continue
+
+        last_snapshot = snapshot
+
+        if snapshot.is_terminal:
+            await _send_terminal(bot, chat_id, message_id, task_id, snapshot)
+            return
+
+    # Timed out.
+    msg = (
+        f"⏰ <b>Тайм-аут.</b> Задача всё ещё не готова за "
+        f"{TEST_GEN_TIMEOUT_SEC // 60} минут.\n\n"
+        f"🆔 <code>{html.escape(task_id)}</code>\n"
+        f"📊 Последний статус: <code>"
+        f"{html.escape(last_snapshot.status if last_snapshot else 'неизвестно')}"
+        f"</code>\n\n"
+        f"Можно подождать и проверить руками:\n"
+        f"<code>/suno_status {html.escape(task_id)}</code>"
+    )
+    with contextlib.suppress(Exception):
+        await bot.edit_message_text(
+            msg, chat_id=chat_id, message_id=message_id
+        )
+
+
+async def _send_terminal(
+    bot: Bot,
+    chat_id: int,
+    message_id: int,
+    task_id: str,
+    snapshot: TaskSnapshot,
+) -> None:
+    """Edit the placeholder + (on success) follow up with the audio URL."""
+    if snapshot.is_success:
+        title = snapshot.title or "(без названия)"
+        duration = (
+            f" · {snapshot.duration:.0f} сек"
+            if snapshot.duration is not None
+            else ""
+        )
+        edited = (
+            "✅ <b>Готово!</b>\n\n"
+            f"🎵 <b>{html.escape(title)}</b>{duration}\n"
+            f"🆔 <code>{html.escape(task_id)}</code>"
+        )
+        with contextlib.suppress(Exception):
+            await bot.edit_message_text(
+                edited, chat_id=chat_id, message_id=message_id
+            )
+
+        # Try to deliver the mp3 directly. If Telegram can't fetch the URL,
+        # fall back to a plain link.
+        if snapshot.audio_url:
+            with contextlib.suppress(Exception):
+                await bot.send_audio(
+                    chat_id,
+                    audio=snapshot.audio_url,
+                    title=title,
+                    performer="Suno",
+                    caption=f"🎵 {html.escape(title)}",
+                )
+                return
+            with contextlib.suppress(Exception):
+                await bot.send_message(
+                    chat_id,
+                    f"🔗 <a href=\"{html.escape(snapshot.audio_url)}\">"
+                    "Скачать mp3</a>",
+                    disable_web_page_preview=False,
+                )
+        return
+
+    # Terminal but not success.
+    edited = (
+        "❌ <b>Suno вернул ошибку.</b>\n\n"
+        f"🆔 <code>{html.escape(task_id)}</code>\n"
+        f"📊 Статус: <code>{html.escape(snapshot.status)}</code>"
+    )
+    with contextlib.suppress(Exception):
+        await bot.edit_message_text(
+            edited, chat_id=chat_id, message_id=message_id
+        )
+
+
+@router.message(Command("suno_status"), F.chat.type == ChatType.PRIVATE)
+async def cmd_suno_status(
+    message: Message, command: CommandObject, session: AsyncSession
+) -> None:
+    """`/suno_status <task_id>` — one-shot check on a Suno task."""
+    if not await _require_admin(message, session):
+        return
+    task_id = (command.args or "").strip()
+    if not task_id:
+        await message.answer(
+            "Использование: <code>/suno_status &lt;task_id&gt;</code>"
+        )
+        return
+
+    api_key = await get_api_key(session)
+    if not api_key:
+        await message.answer(
+            "🔴 API-ключ не задан. Открой /suno и задай его."
+        )
+        return
+
+    client = SunoApiOrgClient(api_key)
+    try:
+        snapshot = await client.get_task(task_id)
+    except SunoApiError as exc:
+        await message.answer(
+            "❌ Suno: <code>" + html.escape(str(exc)) + "</code>"
+        )
+        return
+
+    text_lines = [
+        "🎵 <b>Suno · статус задачи</b>\n",
+        f"🆔 <code>{html.escape(task_id)}</code>",
+        f"📊 Статус: <code>{html.escape(snapshot.status)}</code>",
+    ]
+    if snapshot.title:
+        text_lines.append(f"🎼 Название: <b>{html.escape(snapshot.title)}</b>")
+    if snapshot.duration is not None:
+        text_lines.append(f"⏱ Длительность: {snapshot.duration:.0f} сек")
+    if snapshot.audio_url:
+        text_lines.append(
+            f"🔗 <a href=\"{html.escape(snapshot.audio_url)}\">mp3</a>"
+        )
+    elif snapshot.stream_url:
+        text_lines.append(
+            f"🎧 <a href=\"{html.escape(snapshot.stream_url)}\">"
+            "поток (готов раньше mp3)</a>"
+        )
+
+    await message.answer("\n".join(text_lines), disable_web_page_preview=False)
+
+    if snapshot.is_success and snapshot.audio_url:
+        with contextlib.suppress(Exception):
+            await message.bot.send_audio(  # type: ignore[union-attr]
+                message.chat.id,
+                audio=snapshot.audio_url,
+                title=snapshot.title or "Suno",
+                performer="Suno",
+            )
+
+
+__all__ = ["router"]

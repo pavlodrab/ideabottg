@@ -252,18 +252,50 @@ class SongResult:
     style: str
 ```
 
-**`SunoSelfHostedProvider`** — POST `{SUNO_API_BASE}/api/generate` с body
-```json
-{"prompt": draft.lyrics, "tags": draft.style, "title": draft.title, "make_instrumental": false, "wait_audio": false}
-```
-→ возвращает массив clip-ов с id; берём первый id как `task_id`. `poll` — GET `/api/get?ids={id}` пока `status == "complete"` и `audio_url` не пуст.
+**`SunoApiOrgProvider`** (default, реализован в Phase A) — клиент к публичному
+шлюзу [sunoapi.org](https://sunoapi.org) (платный, без self-hosted). База —
+`https://api.sunoapi.org`, авторизация — Bearer-token из настроек бота
+(см. §7). Все параметры — API-ключ, модель, callback URL — хранятся в БД
+в таблице `settings` и редактируются админом через `/menu → 🎵 Suno API`
+(см. `app/handlers/suno_admin.py`). Никаких env-переменных для Suno.
 
-**`LyricsOnlyProvider`** — `submit` синхронно возвращает sentinel `"lyrics-only"`, `poll` сразу даёт `SongResult(audio_url=None, ...)` из исходного draft.
+- `submit` → `POST /api/v1/generate` с
+  `{"prompt": draft.lyrics, "customMode": true, "instrumental": false,
+    "model": <выбранная модель>, "style": draft.style, "title": draft.title,
+    "callBackUrl": <dummy URL>}` → ответ `{"data": {"taskId": "..."}}`.
+- `poll` → `GET /api/v1/generate/record-info?taskId=...` — возвращает
+  `status` ∈ `{PENDING, TEXT_SUCCESS, FIRST_SUCCESS, SUCCESS, *_FAILED, ...}`
+  и `response.sunoData[]` со списком треков (мы берём первый, у него
+  `audioUrl` появляется при `SUCCESS`).
+
+Эта реализация **уже доступна в Phase A** в виде `app/services/suno.py`
+(класс `SunoApiOrgClient`). Орxестратор `daily_song.py` (Phase 4) поверх
+неё построит `SunoApiOrgProvider`-обёртку, реализующую протокол
+`SongProvider`.
+
+**`SunoSelfHostedProvider`** (реализуется в Phase 4 как backup) — клиент
+к self-hosted [gcui-art/suno-api](https://github.com/gcui-art/suno-api),
+живёт в env (т.к. это адрес внутреннего сервиса, не секрет аккаунта).
+POST `{SUNO_API_BASE}/api/generate` с body
+`{"prompt": draft.lyrics, "tags": draft.style, "title": draft.title,
+"make_instrumental": false, "wait_audio": false}` → массив clip-ов с
+id; берём первый id как `task_id`. `poll` — GET `/api/get?ids={id}`
+пока `status == "complete"` и `audio_url` не пуст.
+
+**`LyricsOnlyProvider`** — `submit` синхронно возвращает sentinel
+`"lyrics-only"`, `poll` сразу даёт `SongResult(audio_url=None, ...)` из
+исходного draft. Используется как фоллбэк, если основной провайдер
+отвалился или таймаутнулся.
 
 Фабрика:
 ```python
-def get_song_provider() -> SongProvider:
-    name = settings.song_provider
+def get_song_provider(session) -> SongProvider:
+    # `song_provider` теперь тоже в settings (key=`suno.provider`),
+    # значения: 'sunoapi_org' (default), 'self_hosted', 'lyrics_only'
+    name = await get_setting(session, "suno.provider") or "sunoapi_org"
+    if name == "sunoapi_org":
+        api_key = await get_api_key(session)
+        return SunoApiOrgProvider(api_key=api_key, ...)
     if name == "self_hosted":
         return SunoSelfHostedProvider(base=settings.suno_api_base, ...)
     if name == "lyrics_only":
@@ -435,16 +467,40 @@ class SongPurgeConfirm(StatesGroup):
     waiting_confirm = State()
 ```
 
-## 7. Конфиг (`app/config.py` + `.env.example`)
+## 7. Конфиг (`app/config.py` + `.env.example` + DB `settings`)
 
-Новые поля в `Settings`:
+**Принцип**: всё, что админ может захотеть менять без редеплоя, живёт в БД
+(таблица `settings`, см. §2 — она уже есть). Env остаётся только для
+секретов уровня инфраструктуры (BOT_TOKEN, DATABASE_URL) и параметров,
+требующих рестарта (TZ, LOG_LEVEL).
+
+### 7.1. Suno (Phase A — DB-backed, реализовано)
+
+Хранится в таблице `settings` под ключами:
+
+| key                 | где используется                       | дефолт                                     |
+|---------------------|----------------------------------------|--------------------------------------------|
+| `suno.api_key`      | Bearer для `api.sunoapi.org`           | (не задан → UI просит ввести)              |
+| `suno.model`        | модель по умолчанию                    | `V4_5`                                     |
+| `suno.callback_url` | поле `callBackUrl` в `/api/v1/generate`| `https://example.com/suno-callback` (мок)  |
+| `suno.provider`     | (Phase 4) выбор провайдера             | `sunoapi_org`                              |
+
+UI — `/suno` или «🎵 Suno API» в `/menu`. См. `app/handlers/suno_admin.py`
+и `app/services/suno.py`.
+
+**Никаких env-переменных для sunoapi.org не нужно.** Owner деплоит бота
+без секретов Suno и потом задаёт ключ в Telegram.
+
+### 7.2. Daily-song оркестрация (Phase 1+)
+
+Эти параметры либо уровень фичи, либо настройка LLM-шлюза, который
+тоже ключи требует. Идём по тому же принципу — секреты в env, поведение в БД:
 
 ```python
-# --- daily song ---
+# --- daily song behavior (env, требует рестарта при изменении) ---
 song_enabled: bool = True
 song_tz: str = "Europe/Moscow"
 song_cron: str = "0 21 * * *"
-song_provider: str = "self_hosted"        # self_hosted | lyrics_only
 song_min_messages: int = 20
 song_max_messages: int = 2000
 song_message_max_len: int = 2000
@@ -452,30 +508,43 @@ song_llm_chunk_size: int = 50
 song_generation_timeout: int = 600        # сек
 song_poll_interval: int = 15              # сек
 
-# --- providers ---
+# --- LLM gateway secret ---
 openrouter_api_key: str | None = None
+
+# --- self-hosted Suno (опционально, как backup-провайдер; не нужен для sunoapi.org) ---
 suno_api_base: str | None = None          # http://suno-api:3000
 ```
 
-**ВАЖНО (наблюдение из код-ревью)**: текущий `app/config.py` использует `Field(default=..., alias=...)` без `from pydantic import Field`. Этот импорт ОТСУТСТВУЕТ в файле. Возможно, это либо мёртвый код (не триггерится на старте), либо реальный bug. В фазе 1 проверяю и фикшу мимоходом — без `Field` (просто `var: type = "default"`), чтобы не плодить новый bug.
+В будущем (post-MVP) можно мигрировать `song_*` поведенческие параметры
+из env в БД — но это не приоритет. `OPENROUTER_API_KEY` тоже можно по
+аналогии с Suno держать в БД через `/menu → 🤖 LLM-модели`, но для MVP
+оставляем в env.
 
-`.env.example` обновляется новой секцией:
+**ВАЖНО (исправлено в Phase A)**: текущий `app/config.py` использовал
+`Field(default=..., alias=...)` без `from pydantic import Field` — это
+ломало старт бота. В Phase A добавлен импорт одной строкой; `quiet_hours_*`
+поля оставлены как есть.
+
+`.env.example` обновляется новой секцией только с тем, что реально нужно
+в env:
 
 ```env
 # --- Daily song feature ---
 SONG_ENABLED=true
 SONG_TZ=Europe/Moscow
 SONG_CRON=0 21 * * *
-SONG_PROVIDER=self_hosted          # self_hosted | lyrics_only
 SONG_MIN_MESSAGES=20
 SONG_MAX_MESSAGES=2000
 
 # OpenRouter (LLM gateway)
 OPENROUTER_API_KEY=
 
-# Self-hosted Suno API (gcui-art/suno-api)
-SUNO_API_BASE=http://suno-api:3000
+# Self-hosted Suno API (gcui-art/suno-api) — опционально, как backup.
+# Если используем sunoapi.org (default), эта строка не нужна.
+SUNO_API_BASE=
 ```
+
+Для Suno (sunoapi.org) — никаких env-переменных, всё через `/suno` в боте.
 
 ## 8. Зависимости (`requirements.txt`)
 
