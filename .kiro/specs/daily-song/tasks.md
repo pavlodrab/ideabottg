@@ -10,7 +10,7 @@
 | Фаза | Что делает | Статус | Done | In PR | Total |
 |------|-----------|--------|------|-------|-------|
 | 0 | Спека (этот файл + requirements + design) | `[x]` | 1 | 0 | 1 |
-| A | Suno API настройка через бота (sunoapi.org) — независимая от 1–6 | `[~]` | 0 | 5 | 5 |
+| A | Suno API настройка через бота (sunoapi.org) — независимая от 1–6 | `[~]` | 0 | 6 | 6 |
 | 1 | Capture pipeline: миграция `chat_messages`, хэндлер-логгер, конфиг-фикс | `[ ]` | 0 | 0 | 5 |
 | 2 | LLM-абстракция: OpenRouter-клиент, таблица `llm_models`, рантайм-управление через `/menu` | `[ ]` | 0 | 0 | 6 |
 | 3 | Summarizer + songwriter: map-reduce, JSON-парсинг с ретраями, dry-run `/song_test` | `[ ]` | 0 | 0 | 4 |
@@ -18,7 +18,7 @@
 | 5 | Полировка: `/song_stats`, `/song_purge`, alert при первом включении, sweep `stale_on_restart` | `[ ]` | 0 | 0 | 4 |
 | 6 | Опционально: тесты-смоук, retention-cron, обложка mp3 | `[ ]` | 0 | 0 | 3 |
 
-**Итого**: 1 / 5 / 35
+**Итого**: 1 / 6 / 36
 
 ## Открытые PR
 
@@ -59,6 +59,13 @@ vse cherez bota nastroit»). Никаких env-переменных для Suno
   - `httpx==0.27.2` в `requirements.txt`.
   - `.env.example` — секция отмечает, что для Suno env не нужен (всё через `/suno`).
   - Этот файл (`tasks.md`) и `design.md` обновлены: §3.6 описывает `SunoApiOrgProvider` как готовый к интеграции в Phase 4, §7 разделён на 7.1 (Suno в БД) и 7.2 (daily-song env). _(PR [#26](https://github.com/pavlodrab/ideabottg/pull/26))_
+- [~] **A.6** Хардинг под реальные доки sunoapi.org:
+  - `TaskSnapshot.from_response` теперь принимает обе формы списка треков из доков — OpenAPI `response.sunoData[]` (camelCase) И Quickstart `response.data[]` (snake_case).
+  - `get_credits` сначала пробует `/api/v1/generate/credit` (OpenAPI), на 404 падает на `/api/v1/get-credits` (Quickstart-сэмпл) — официальная дока противоречит сама себе.
+  - `STATUS_FAILED` добавлен в `TERMINAL_STATUSES` (упомянут в Quickstart-прозе, отсутствует в OpenAPI-enum). Неизвестные статусы (`GENERATING`, etc.) трактуем как нетерминальные — лучше лишний раз популить, чем зависнуть.
+  - `TaskSnapshot.error_message` парсит `data.errorMessage` (есть в OpenAPI-схеме) — теперь юзеру в фейле видна причина из API, а не только статус-код.
+  - `SunoApiError.humanized()` — гуманайзер кодов ошибок Suno (401/413/429/430/455/etc.) на русский. Используется во всех местах вывода ошибок (валидация ключа, баланс, генерация, статус). _(PR [#26](https://github.com/pavlodrab/ideabottg/pull/26))_
+  - В success-сообщении тестовой генерации появилась подсказка про 15-дневный retention файлов на серверах Suno.
 
 **Definition of done фазы A**: владелец задаёт ключ через `/suno → 🔑 Задать API-ключ`, видит баланс кредитов, выбирает модель, нажимает «🧪 Тестовая генерация», вводит prompt → через 2–3 минуты бот в личке присылает mp3.
 

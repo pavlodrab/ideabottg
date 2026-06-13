@@ -180,7 +180,7 @@ async def receive_api_key(
     except SunoApiError as exc:
         await message.answer(
             "❌ <b>Ключ не принят Suno API.</b>\n\n"
-            f"Ответ: <code>{html.escape(str(exc))}</code>\n\n"
+            f"Причина: {html.escape(exc.humanized())}\n\n"
             "Перепроверь ключ на "
             "<a href=\"https://sunoapi.org/api-key\">sunoapi.org/api-key</a> "
             "и попробуй ещё раз. Или /cancel.",
@@ -258,7 +258,7 @@ async def cb_suno_credits(
         credits = await client.get_credits()
     except SunoApiError as exc:
         await callback.answer(
-            f"⚠️ Suno: {exc}", show_alert=True
+            f"⚠️ Suno: {exc.humanized()}", show_alert=True
         )
         return
 
@@ -279,7 +279,9 @@ async def cmd_suno_credits(message: Message, session: AsyncSession) -> None:
     try:
         credits = await client.get_credits()
     except SunoApiError as exc:
-        await message.answer(f"⚠️ Suno API ответил: <code>{html.escape(str(exc))}</code>")
+        await message.answer(
+            "⚠️ Suno API: " + html.escape(exc.humanized())
+        )
         return
     await message.answer(f"💰 Остаток кредитов: <b>{credits}</b>")
 
@@ -404,7 +406,7 @@ async def receive_test_prompt(
         await state.clear()
         await message.answer(
             "❌ Suno отклонил задачу: "
-            f"<code>{html.escape(str(exc))}</code>"
+            + html.escape(exc.humanized())
         )
         return
 
@@ -501,7 +503,9 @@ async def _send_terminal(
         edited = (
             "✅ <b>Готово!</b>\n\n"
             f"🎵 <b>{html.escape(title)}</b>{duration}\n"
-            f"🆔 <code>{html.escape(task_id)}</code>"
+            f"🆔 <code>{html.escape(task_id)}</code>\n\n"
+            "ℹ️ Файл хранится на серверах Suno <b>15 дней</b> — "
+            "если нужно надолго, сохрани mp3 себе."
         )
         with contextlib.suppress(Exception):
             await bot.edit_message_text(
@@ -529,11 +533,13 @@ async def _send_terminal(
                 )
         return
 
-    # Terminal but not success.
+    # Terminal but not success — show errorMessage from API if present.
+    reason = snapshot.error_message or snapshot.status
     edited = (
         "❌ <b>Suno вернул ошибку.</b>\n\n"
         f"🆔 <code>{html.escape(task_id)}</code>\n"
-        f"📊 Статус: <code>{html.escape(snapshot.status)}</code>"
+        f"📊 Статус: <code>{html.escape(snapshot.status)}</code>\n"
+        f"💬 Причина: {html.escape(reason)}"
     )
     with contextlib.suppress(Exception):
         await bot.edit_message_text(
@@ -567,7 +573,7 @@ async def cmd_suno_status(
         snapshot = await client.get_task(task_id)
     except SunoApiError as exc:
         await message.answer(
-            "❌ Suno: <code>" + html.escape(str(exc)) + "</code>"
+            "❌ Suno: " + html.escape(exc.humanized())
         )
         return
 
@@ -576,6 +582,10 @@ async def cmd_suno_status(
         f"🆔 <code>{html.escape(task_id)}</code>",
         f"📊 Статус: <code>{html.escape(snapshot.status)}</code>",
     ]
+    if snapshot.error_message:
+        text_lines.append(
+            f"💬 Причина: {html.escape(snapshot.error_message)}"
+        )
     if snapshot.title:
         text_lines.append(f"🎼 Название: <b>{html.escape(snapshot.title)}</b>")
     if snapshot.duration is not None:

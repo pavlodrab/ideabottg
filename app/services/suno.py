@@ -59,7 +59,13 @@ KEY_API_KEY = "suno.api_key"
 KEY_MODEL = "suno.model"
 KEY_CALLBACK_URL = "suno.callback_url"
 
-# Suno task statuses (per `record-info` endpoint)
+# Suno task statuses (per `record-info` endpoint).
+#
+# The OpenAPI spec at https://docs.sunoapi.org/suno-api/get-music-generation-details.md
+# enumerates the constants below. The Quickstart prose additionally mentions
+# `GENERATING` (non-terminal) and `FAILED` (terminal, generic). We treat
+# unknown statuses as non-terminal so the poller keeps trying — better than
+# bailing on a value the docs forgot to list.
 STATUS_PENDING = "PENDING"
 STATUS_TEXT_SUCCESS = "TEXT_SUCCESS"
 STATUS_FIRST_SUCCESS = "FIRST_SUCCESS"
@@ -68,6 +74,7 @@ STATUS_CREATE_TASK_FAILED = "CREATE_TASK_FAILED"
 STATUS_GENERATE_AUDIO_FAILED = "GENERATE_AUDIO_FAILED"
 STATUS_CALLBACK_EXCEPTION = "CALLBACK_EXCEPTION"
 STATUS_SENSITIVE_WORD_ERROR = "SENSITIVE_WORD_ERROR"
+STATUS_FAILED = "FAILED"  # documented only in Quickstart prose
 
 TERMINAL_STATUSES = {
     STATUS_SUCCESS,
@@ -75,6 +82,20 @@ TERMINAL_STATUSES = {
     STATUS_GENERATE_AUDIO_FAILED,
     STATUS_CALLBACK_EXCEPTION,
     STATUS_SENSITIVE_WORD_ERROR,
+    STATUS_FAILED,
+}
+
+# https://docs.sunoapi.org/suno-api/generate-music.md → "Status Codes"
+ERROR_CODE_HINTS: dict[int, str] = {
+    400: "невалидные параметры",
+    401: "ключ не принят (неверный или сброшен)",
+    404: "путь или метод неверный",
+    405: "превышен rate limit",
+    413: "prompt слишком длинный — обрежь и попробуй ещё раз",
+    429: "на аккаунте кончились кредиты",
+    430: "слишком частые запросы — подожди 10–30 секунд",
+    455: "у Suno техработы — попробуй позже",
+    500: "ошибка на стороне Suno",
 }
 
 
@@ -130,6 +151,15 @@ class SunoApiError(RuntimeError):
         super().__init__(f"[{code}] {msg}")
         self.code = code
         self.msg = msg
+
+    def humanized(self) -> str:
+        """Russian-language one-liner for showing in the bot UI."""
+        hint = ERROR_CODE_HINTS.get(self.code)
+        if hint:
+            return f"{hint} (код {self.code}: {self.msg})"
+        if self.code == 0:
+            return f"сеть/таймаут: {self.msg}"
+        return f"код {self.code}: {self.msg}"
 
 
 class SunoApiOrgClient:
@@ -197,8 +227,21 @@ class SunoApiOrgClient:
         return data
 
     async def get_credits(self) -> int:
-        """Remaining credits on the account."""
-        data = await self._request("GET", "/api/v1/generate/credit")
+        """Remaining credits on the account.
+
+        The official docs are inconsistent on the path of this endpoint:
+        the OpenAPI spec lists `/api/v1/generate/credit`, while the
+        Quickstart sample code uses `/api/v1/get-credits`. We try the
+        OpenAPI path first and fall back to the Quickstart path on 404.
+        """
+        try:
+            data = await self._request("GET", "/api/v1/generate/credit")
+        except SunoApiError as exc:
+            if exc.code == 404:
+                data = await self._request("GET", "/api/v1/get-credits")
+            else:
+                raise
+
         body = data.get("data")
         if isinstance(body, int):
             return body
@@ -267,9 +310,14 @@ class SunoApiOrgClient:
 class TaskSnapshot:
     """Cleaned-up view of a `record-info` response.
 
-    The first track in `sunoData` is exposed as the canonical result;
-    the raw payload is preserved on `.raw` for callers that need both
-    tracks or extra metadata.
+    The first track is exposed as the canonical result; raw payload is
+    preserved on `.raw` for callers that need both tracks or extra
+    metadata.
+
+    The Suno docs are inconsistent about the array key inside `response`:
+    the OpenAPI schema uses `sunoData[]` with camelCase fields, while
+    the Quickstart prose uses `data[]` with snake_case fields. We accept
+    both shapes so the client doesn't break if the API switches.
     """
 
     status: str
@@ -278,6 +326,7 @@ class TaskSnapshot:
     stream_url: str | None
     image_url: str | None
     duration: float | None
+    error_message: str | None
     raw: dict[str, Any]
 
     @classmethod
@@ -288,7 +337,11 @@ class TaskSnapshot:
             or STATUS_PENDING
         )
         response = payload.get("response") or {}
-        items = response.get("sunoData") or []
+        # Accept either OpenAPI `sunoData` (camelCase) or Quickstart `data`
+        # (snake_case) shape — see class docstring.
+        items = response.get("sunoData")
+        if not items:
+            items = response.get("data") or []
         first = items[0] if items else {}
 
         return cls(
@@ -298,6 +351,7 @@ class TaskSnapshot:
             stream_url=_first(first, "streamAudioUrl", "stream_audio_url"),
             image_url=_first(first, "imageUrl", "image_url"),
             duration=_to_float(_first(first, "duration")),
+            error_message=_first(payload, "errorMessage", "error_message"),
             raw=payload,
         )
 
