@@ -41,7 +41,7 @@
 | [#30](https://github.com/pavlodrab/ideabottg/pull/30) | `feat/scheduled-daily-song` | E | автоматическая «Песня дня» по расписанию: per-chat opt-in + cron-job поверх `song_pipeline`, UI расписания в per-chat `/musicmenu` |
 | [#31](https://github.com/pavlodrab/ideabottg/pull/31) | `feat/song-stats-purge` | 5 | `/song_stats` + `/song_purge` (OWNER, с подтверждением); стек поверх PR #30 |
 | [#32](https://github.com/pavlodrab/ideabottg/pull/32) | `feat/song-dedup-fallback-tests` | F · 4 · 6 | dedup по дню + LyricsOnly fallback + обложка mp3 + pytest smoke-сьют; стек поверх PR #31 |
-| _TBD_ | `feat/daily-songs-ledger` | 4 · 5.3 | ledger `daily_songs` (миграция 0009 + модель) + provider-абстракция `song_provider.py` + оркестратор `daily_song.py` + sweep `stale_on_restart`; стек поверх PR #32 |
+| [#33](https://github.com/pavlodrab/ideabottg/pull/33) | `feat/daily-songs-ledger` | 4 · 5.3 | ledger `daily_songs` (миграция 0009 + модель) + provider-абстракция `song_provider.py` + оркестратор `daily_song.py` + sweep `stale_on_restart`; стек поверх PR #32 |
 
 ---
 
@@ -165,10 +165,10 @@ vse cherez bota nastroit»). Никаких env-переменных для Suno
 
 Цель: полный пайплайн работает; cron каждый день постит mp3 в чат.
 
-- [~] **4.1** Alembic-миграция `0009_daily_songs`: таблица `daily_songs` (per-(chat, date) ledger, unique `(chat_id, date_local)`). _(PR `feat/daily-songs-ledger`)_
-- [~] **4.2** Модель `DailySong` в `app/models.py`. _(PR `feat/daily-songs-ledger`)_
-- [~] **4.3** `app/services/song_provider.py`: `SongProvider` Protocol + `SunoApiOrgProvider` (обёртка `SunoApiOrgClient`) + `LyricsOnlyProvider` + фабрика `get_song_provider` (ключ `suno.provider`, default `sunoapi_org`). `self_hosted` — явный `SongProviderError` (не подключён). _(PR `feat/daily-songs-ledger`)_
-- [~] **4.4** `app/services/daily_song.py`: оркестратор `run_daily_song_for_chat` — ledger queued→generating→done/skipped/failed, дедуп по дню через unique-индекс, постинг mp3+обложка+lyrics, fallback на `LyricsOnlyProvider`/текст при фейле/таймауте Suno. _(PR `feat/daily-songs-ledger`)_
+- [~] **4.1** Alembic-миграция `0009_daily_songs`: таблица `daily_songs` (per-(chat, date) ledger, unique `(chat_id, date_local)`). _(PR [#33](https://github.com/pavlodrab/ideabottg/pull/33))_
+- [~] **4.2** Модель `DailySong` в `app/models.py`. _(PR [#33](https://github.com/pavlodrab/ideabottg/pull/33))_
+- [~] **4.3** `app/services/song_provider.py`: `SongProvider` Protocol + `SunoApiOrgProvider` (обёртка `SunoApiOrgClient`) + `LyricsOnlyProvider` + фабрика `get_song_provider` (ключ `suno.provider`, default `sunoapi_org`). `self_hosted` — явный `SongProviderError` (не подключён). _(PR [#33](https://github.com/pavlodrab/ideabottg/pull/33))_
+- [~] **4.4** `app/services/daily_song.py`: оркестратор `run_daily_song_for_chat` — ledger queued→generating→done/skipped/failed, дедуп по дню через unique-индекс, постинг mp3+обложка+lyrics, fallback на `LyricsOnlyProvider`/текст при фейле/таймауте Suno. _(PR [#33](https://github.com/pavlodrab/ideabottg/pull/33))_
 - [x] **4.5** Scheduler job-тип `song:{chat_id}`, `_schedule_song`, `_run_song`, регистрация в `start()`/`sync_chat()` — Фаза E. _(PR [#30](https://github.com/pavlodrab/ideabottg/pull/30))_
 - [x] **4.6** `/song_now <chat_id>` — Фаза D. _(PR [#29](https://github.com/pavlodrab/ideabottg/pull/29) — merged)_
 - [x] **4.7** Toggle «Песня дня» — реализован как UI расписания «📅 Расписание песни дня» в per-chat `/musicmenu` (Фаза E). _(PR [#30](https://github.com/pavlodrab/ideabottg/pull/30))_
@@ -183,7 +183,7 @@ vse cherez bota nastroit»). Никаких env-переменных для Suno
 
 - [~] **5.1** `/song_stats` (DM, admin) — `songs.song_stats(days=30)`: всего песен, за 30 дней, топ-10 по чатам, распределение не-success статусов.
 - [~] **5.2** `/song_purge <chat_id>` (только OWNER) — `chat_messages.purge_chat_history`, inline-confirm с числом сообщений. Песни не трогаются (N1.3).
-- [~] **5.3** Sweep при старте (F8.3): `daily_songs` со статусом `queued`/`generating` старше 24ч → `failed, error="stale_on_restart"`. Реализовано: `daily_songs.sweep_stale`, вызывается в `IdeaScheduler.start()`. _(PR `feat/daily-songs-ledger`)_
+- [~] **5.3** Sweep при старте (F8.3): `daily_songs` со статусом `queued`/`generating` старше 24ч → `failed, error="stale_on_restart"`. Реализовано: `daily_songs.sweep_stale`, вызывается в `IdeaScheduler.start()`. _(PR [#33](https://github.com/pavlodrab/ideabottg/pull/33))_
 - [x] **5.4** Маскирование API-ключей в логах — закрыто: `mask_key` в `app/services/suno.py` и `app/services/llm.py` используется во всех лог-строках с ключом; сырой ключ нигде не логируется. _(PR [#26](https://github.com/pavlodrab/ideabottg/pull/26) — merged, [#28](https://github.com/pavlodrab/ideabottg/pull/28) — merged)_
 
 ---
