@@ -1,8 +1,9 @@
-from datetime import datetime
+from datetime import date, datetime
 
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -242,4 +243,56 @@ class Song(Base):
         server_default=func.now(),
         nullable=False,
         index=True,
+    )
+
+
+class DailySong(Base):
+    """Per-(chat, local-date) ledger of scheduled song-of-the-day runs.
+
+    Exactly one row per chat per local date (unique constraint) — this
+    is the dedup + status-tracking record for the automatic daily song.
+    Distinct from ``Song`` (which stores every successful generation,
+    including manual ``/song_now`` and ``/suno`` test-gens): a
+    ``DailySong`` is the *run*, a ``Song`` is the *artifact*. On success
+    ``song_id`` links to the produced ``Song``.
+
+    Status lifecycle: ``queued`` → ``generating`` → ``done`` | ``skipped``
+    | ``failed``. Rows left in queued/generating after a restart are
+    swept to ``failed`` on scheduler start (F8.3).
+    """
+
+    __tablename__ = "daily_songs"
+    __table_args__ = (
+        UniqueConstraint(
+            "chat_id", "date_local", name="uq_daily_songs_chat_date"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    chat_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("chats.chat_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    date_local: Mapped[date] = mapped_column(Date, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(16), default="queued", nullable=False, index=True
+    )
+    provider: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    suno_task_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    song_id: Mapped[int | None] = mapped_column(
+        ForeignKey("songs.id", ondelete="SET NULL"), nullable=True
+    )
+    title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    style: Mapped[str | None] = mapped_column(Text, nullable=True)
+    n_messages: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )

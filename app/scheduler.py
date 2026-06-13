@@ -101,6 +101,18 @@ class IdeaScheduler:
         for chat in song_chats:
             self._schedule_song(chat.chat_id, chat.song_cron)
 
+        # F8.3: sweep daily_songs rows left mid-flight by a crash/restart
+        # so today's run isn't blocked by a stuck 'generating' row.
+        async with SessionLocal() as session:
+            from app.services.daily_songs import sweep_stale
+
+            try:
+                swept = await sweep_stale(session)
+                if swept:
+                    log.info("swept %d stale daily_songs row(s)", swept)
+            except Exception:  # noqa: BLE001
+                log.exception("daily_songs stale sweep failed")
+
         # Always-on housekeeping: prune chat_messages older than the
         # retention window every hour.
         self._schedule_retention()
@@ -224,10 +236,10 @@ class IdeaScheduler:
 
         # Quiet hours intentionally NOT applied — the daily song is an
         # explicitly-scheduled, opt-in event, like the spec's 21:00 post.
-        from app.services.song_pipeline import run_scheduled_song_for_chat
+        from app.services.daily_song import run_daily_song_for_chat
 
         try:
-            await run_scheduled_song_for_chat(self.bot, chat_id)
+            await run_daily_song_for_chat(self.bot, chat_id)
         except Exception:  # noqa: BLE001
             log.exception("daily-song job failed for chat_id=%s", chat_id)
 

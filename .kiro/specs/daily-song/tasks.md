@@ -18,20 +18,21 @@
 | E | Scheduled daily song: миграция `chats.song_*`, scheduler-job, headless pipeline, UI расписания | `[~]` | 0 | 4 | 4 |
 | 2 | LLM-абстракция: OpenRouter-клиент, таблица `llm_models`, рантайм-управление через `/menu` | `⛔ superseded (C)` | 1 | 0 | 6 |
 | 3 | Summarizer + songwriter: map-reduce, JSON-парсинг с ретраями, dry-run `/song_test` | `⛔ superseded (D)` | 0 | 0 | 4 |
-| 4 | Song-провайдер + оркестратор: миграция `daily_songs`, SunoApiOrgProvider+SunoSelfHosted+LyricsOnly, `daily_song.py`, `/song_now`, scheduler-job, постинг в чат | `[ ]` | 0 | 0 | 7 |
-| 5 | Полировка: `/song_stats`, `/song_purge`, alert при первом включении, sweep `stale_on_restart` | `[~]` | 1 | 2 | 4 |
+| 4 | Song-провайдер + оркестратор: миграция `daily_songs`, SunoApiOrgProvider+LyricsOnly, `daily_song.py`, `/song_now`, scheduler-job, постинг в чат | `[~]` | 1 | 6 | 7 |
+| 5 | Полировка: `/song_stats`, `/song_purge`, alert при первом включении, sweep `stale_on_restart` | `[~]` | 1 | 3 | 4 |
 | F | Dedup по дню + LyricsOnly fallback + обложка mp3 + pytest smoke-сьют | `[~]` | 0 | 4 | 4 |
 | 6 | Опционально: тесты-смоук, retention-cron, обложка mp3 | `[ ]` | 0 | 0 | 3 |
 
-**Итого**: 31 / 10 / 61
+**Итого**: 32 / 17 / 61
 
 > Из 61 задачи **superseded MVP-архитектурой** (Фазы C/D): 9 (вся Фаза 2 кроме
-> 2.4 + вся Фаза 3). **N/A в MVP**: 5.3, 6.2. **Частично superseded Фазой E/F**:
-> Фаза 4 (scheduler + постинг — E; dedup по дню и LyricsOnly fallback — F;
-> остаются 4.1–4.2 `daily_songs` и 4.3 provider-абстракция как post-MVP).
-> Задачи 6.1/6.3 реализованы в Фазе F (F.4/F.3). Функционально фича готова:
-> capture → OpenRouter → Suno → постинг, ручной (`/song_now`) и по расписанию
-> (Фаза E) с дедупом и текстовым fallback.
+> 2.4 + вся Фаза 3). **N/A**: 6.2 (retention уже 2 дня). Остальное реализовано
+> или в открытых PR. Фаза 4 закрыта полностью: scheduler+постинг (E),
+> `/song_now` (D), ledger `daily_songs` + provider-абстракция + оркестратор
+> `daily_song.py` + sweep `stale_on_restart` (этот PR). 6.1/6.3 — в Фазе F.
+> Функционально фича готова end-to-end: capture → OpenRouter → Suno → постинг,
+> ручной (`/song_now`) и по расписанию с дедупом, обложкой и текстовым
+> fallback при отказе Suno.
 
 ## Открытые PR
 
@@ -40,6 +41,7 @@
 | [#30](https://github.com/pavlodrab/ideabottg/pull/30) | `feat/scheduled-daily-song` | E | автоматическая «Песня дня» по расписанию: per-chat opt-in + cron-job поверх `song_pipeline`, UI расписания в per-chat `/musicmenu` |
 | [#31](https://github.com/pavlodrab/ideabottg/pull/31) | `feat/song-stats-purge` | 5 | `/song_stats` + `/song_purge` (OWNER, с подтверждением); стек поверх PR #30 |
 | [#32](https://github.com/pavlodrab/ideabottg/pull/32) | `feat/song-dedup-fallback-tests` | F · 4 · 6 | dedup по дню + LyricsOnly fallback + обложка mp3 + pytest smoke-сьют; стек поверх PR #31 |
+| _TBD_ | `feat/daily-songs-ledger` | 4 · 5.3 | ledger `daily_songs` (миграция 0009 + модель) + provider-абстракция `song_provider.py` + оркестратор `daily_song.py` + sweep `stale_on_restart`; стек поверх PR #32 |
 
 ---
 
@@ -155,25 +157,23 @@ vse cherez bota nastroit»). Никаких env-переменных для Suno
 
 ## Фаза 4 — Song-провайдер + оркестратор + scheduler + постинг
 
-> **Частично реализовано Фазами E (PR #30) и F:** scheduler-job `song:{chat_id}`,
-> постинг mp3 в чат и оркестрация поверх `song_pipeline` — Фаза E. Ручной
-> `/song_now` (4.6) — Фаза D (PR #29). Dedup по дню (часть 4.4) и LyricsOnly
-> fallback (4.3 в части fallback, F5.4) — Фаза F. Остаются как **post-MVP**:
-> таблица `daily_songs` (4.1–4.2), полноценная provider-абстракция
-> `SongProvider` + self-hosted (4.3), toggle в `chat_settings_keyboard`
-> (4.7 — заменён UI расписания в per-chat `/musicmenu` из Фазы E).
+> **Реализовано.** 4.5 — Фаза E (PR #30). 4.6 — Фаза D (PR #29). 4.7 заменён
+> UI расписания (Фаза E). 4.1–4.4 — **этот PR** (`feat/daily-songs-ledger`):
+> таблица `daily_songs`, модель `DailySong`, `song_provider.py` (Protocol +
+> SunoApiOrg + LyricsOnly + factory; self-hosted — явный TODO в factory),
+> оркестратор `daily_song.py` с ledger-дедупом и LyricsOnly-fallback.
 
-Цель: полный пайплайн работает; cron каждый день в 21:00 MSK постит mp3 в чат.
+Цель: полный пайплайн работает; cron каждый день постит mp3 в чат.
 
-- [ ] **4.1** Alembic-миграция `20260613_0008_daily_songs.py`: таблица `daily_songs` (см. design §2.3).
-- [ ] **4.2** Модель `DailySong` в `app/models.py`.
-- [ ] **4.3** Сервис `app/services/song_provider.py`: `SongProvider` Protocol + `SunoApiOrgProvider` (обёртка поверх `app/services/suno.py::SunoApiOrgClient` из Phase A) + `SunoSelfHostedProvider` + `LyricsOnlyProvider` + фабрика. Выбор активного провайдера — через ключ `suno.provider` в БД (default `sunoapi_org`); env остаются только для `SUNO_API_BASE` (адрес self-hosted backup).
-- [ ] **4.4** Сервис `app/services/daily_song.py`: оркестратор `run_daily_song_for_chat`, `post_song_to_chat`. Транзакционные апдейты статуса. Fallback на `LyricsOnlyProvider` при таймауте Suno.
-- [ ] **4.5** Расширить `app/scheduler.py`: новый job-тип `song:{chat_id}`, `_schedule_song`, `_run_song`, регистрация в `start()` и `sync_chat()`.
-- [ ] **4.6** Команда `/song_now <chat_id>` в `song_admin.py`: ручной trigger пайплайна с записью в БД.
-- [ ] **4.7** Toggle «🎵 Песня дня» в `chat_settings_keyboard`. Callback `song:toggle:{chat_id}`. При первом включении — alert N1.2.
+- [~] **4.1** Alembic-миграция `0009_daily_songs`: таблица `daily_songs` (per-(chat, date) ledger, unique `(chat_id, date_local)`). _(PR `feat/daily-songs-ledger`)_
+- [~] **4.2** Модель `DailySong` в `app/models.py`. _(PR `feat/daily-songs-ledger`)_
+- [~] **4.3** `app/services/song_provider.py`: `SongProvider` Protocol + `SunoApiOrgProvider` (обёртка `SunoApiOrgClient`) + `LyricsOnlyProvider` + фабрика `get_song_provider` (ключ `suno.provider`, default `sunoapi_org`). `self_hosted` — явный `SongProviderError` (не подключён). _(PR `feat/daily-songs-ledger`)_
+- [~] **4.4** `app/services/daily_song.py`: оркестратор `run_daily_song_for_chat` — ledger queued→generating→done/skipped/failed, дедуп по дню через unique-индекс, постинг mp3+обложка+lyrics, fallback на `LyricsOnlyProvider`/текст при фейле/таймауте Suno. _(PR `feat/daily-songs-ledger`)_
+- [x] **4.5** Scheduler job-тип `song:{chat_id}`, `_schedule_song`, `_run_song`, регистрация в `start()`/`sync_chat()` — Фаза E. _(PR [#30](https://github.com/pavlodrab/ideabottg/pull/30))_
+- [x] **4.6** `/song_now <chat_id>` — Фаза D. _(PR [#29](https://github.com/pavlodrab/ideabottg/pull/29) — merged)_
+- [x] **4.7** Toggle «Песня дня» — реализован как UI расписания «📅 Расписание песни дня» в per-chat `/musicmenu` (Фаза E). _(PR [#30](https://github.com/pavlodrab/ideabottg/pull/30))_
 
-**Definition of done фазы 4**: `/song_now` для тест-чата → mp3 в чате; следующий день в 21:00 MSK — сработает по cron автоматически.
+**Definition of done фазы 4**: `/song_now` → mp3 в чате; по cron — авто-постинг с дедупом и текстовым fallback. ✔ (`_run_song` → `daily_song.run_daily_song_for_chat`).
 
 ---
 
@@ -183,7 +183,7 @@ vse cherez bota nastroit»). Никаких env-переменных для Suno
 
 - [~] **5.1** `/song_stats` (DM, admin) — `songs.song_stats(days=30)`: всего песен, за 30 дней, топ-10 по чатам, распределение не-success статусов.
 - [~] **5.2** `/song_purge <chat_id>` (только OWNER) — `chat_messages.purge_chat_history`, inline-confirm с числом сообщений. Песни не трогаются (N1.3).
-- [ ] **5.3** ~~Sweep при старте (F8.3): `daily_songs` queued/generating старше 24ч → failed~~ — **N/A в MVP**: таблицы `daily_songs` нет, `songs` пишется только на success. Вернётся, если появится `daily_songs` (post-MVP).
+- [~] **5.3** Sweep при старте (F8.3): `daily_songs` со статусом `queued`/`generating` старше 24ч → `failed, error="stale_on_restart"`. Реализовано: `daily_songs.sweep_stale`, вызывается в `IdeaScheduler.start()`. _(PR `feat/daily-songs-ledger`)_
 - [x] **5.4** Маскирование API-ключей в логах — закрыто: `mask_key` в `app/services/suno.py` и `app/services/llm.py` используется во всех лог-строках с ключом; сырой ключ нигде не логируется. _(PR [#26](https://github.com/pavlodrab/ideabottg/pull/26) — merged, [#28](https://github.com/pavlodrab/ideabottg/pull/28) — merged)_
 
 ---

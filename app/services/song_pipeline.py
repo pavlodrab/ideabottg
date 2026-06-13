@@ -46,12 +46,10 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
 
 from aiogram import Bot
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import settings
 from app.db import SessionLocal
 from app.models import Chat
 from app.services.chat_messages import fetch_messages_since
@@ -64,7 +62,7 @@ from app.services.llm import (
     get_referer as get_llm_referer,
     get_system_prompt as get_llm_system_prompt,
 )
-from app.services.songs import has_song_on_date, set_tg_file_id, upsert_song
+from app.services.songs import set_tg_file_id, upsert_song
 from app.services.suno import (
     SunoApiError,
     SunoApiOrgClient,
@@ -403,22 +401,35 @@ async def collect_recent_messages(
     )
 
 
-async def start_song_generation(
+@dataclass
+class DraftBundle:
+    """Everything the LLM half produces — reused by both the manual
+    flow (``start_song_generation``) and the scheduled orchestrator
+    (``daily_song.run_daily_song_for_chat``). Holds the Suno key/model
+    so the caller can submit via either ``SunoApiOrgClient`` directly
+    or a ``SongProvider``."""
+
+    draft: SongDraft
+    n_messages: int
+    llm_model: str
+    suno_model: str
+    suno_key: str
+    callback_url: str
+    target_sec: int
+
+
+async def generate_song_draft(
     *,
     session: AsyncSession,
     chat_id: int,
     requested_by: int | None = None,
     window_hours: int = DEFAULT_WINDOW_HOURS,
     min_messages: int = DEFAULT_MIN_MESSAGES,
-) -> SongGenerationResult:
-    """Run the synchronous half of the pipeline: history → LLM → Suno
-    submit.
+) -> DraftBundle:
+    """History → LLM ``SongDraft`` (no Suno submit).
 
-    The Suno polling step is intentionally split out (see
-    :func:`watch_suno_task`) so the caller can decide where to place
-    the placeholder message and where to deliver the final mp3 — the
-    "request from /musicmenu in DM, post mp3 to the group" flow needs
-    different ``notify_chat_id`` values for placeholder and audio.
+    Raises :class:`SongPipelineError` with a machine code on any
+    refusal (missing key, too few messages, bad LLM JSON).
     """
     # 1. Validate keys.
     suno_key = await get_suno_api_key(session)
@@ -474,7 +485,7 @@ async def start_song_generation(
     callback_url = await get_callback_url(session)
 
     log.info(
-        "song-pipeline: start chat_id=%s n_messages=%s text_chars=%s "
+        "song-pipeline: draft-start chat_id=%s n_messages=%s text_chars=%s "
         "llm=%s suno=%s target_sec=%s style_override=%r requested_by=%s",
         chat_id,
         len(messages),
@@ -504,17 +515,47 @@ async def start_song_generation(
         len(draft.lyrics),
     )
 
-    # 6. Suno submit (customMode so we control title / style / lyrics).
-    suno_client = SunoApiOrgClient(suno_key)
+    return DraftBundle(
+        draft=draft,
+        n_messages=len(messages),
+        llm_model=llm_model,
+        suno_model=suno_model,
+        suno_key=suno_key,
+        callback_url=callback_url,
+        target_sec=target_sec,
+    )
+
+
+async def start_song_generation(
+    *,
+    session: AsyncSession,
+    chat_id: int,
+    requested_by: int | None = None,
+    window_hours: int = DEFAULT_WINDOW_HOURS,
+    min_messages: int = DEFAULT_MIN_MESSAGES,
+) -> SongGenerationResult:
+    """Run the synchronous half of the manual pipeline: history → LLM →
+    Suno submit. Polling is split out (see :func:`watch_suno_task`).
+    """
+    bundle = await generate_song_draft(
+        session=session,
+        chat_id=chat_id,
+        requested_by=requested_by,
+        window_hours=window_hours,
+        min_messages=min_messages,
+    )
+
+    # Suno submit (customMode so we control title / style / lyrics).
+    suno_client = SunoApiOrgClient(bundle.suno_key)
     try:
         task_id = await suno_client.generate_music(
-            prompt=draft.lyrics,
-            model=suno_model,
-            callback_url=callback_url,
+            prompt=bundle.draft.lyrics,
+            model=bundle.suno_model,
+            callback_url=bundle.callback_url,
             custom_mode=True,
             instrumental=False,
-            style=draft.style,
-            title=draft.title,
+            style=bundle.draft.style,
+            title=bundle.draft.title,
         )
     except SunoApiError as exc:
         raise SongPipelineError(
@@ -526,15 +567,15 @@ async def start_song_generation(
         "song-pipeline: suno-submit chat_id=%s task_id=%s suno_model=%s",
         chat_id,
         task_id,
-        suno_model,
+        bundle.suno_model,
     )
 
     return SongGenerationResult(
         suno_task_id=task_id,
-        draft=draft,
-        n_messages=len(messages),
-        llm_model=llm_model,
-        suno_model=suno_model,
+        draft=bundle.draft,
+        n_messages=bundle.n_messages,
+        llm_model=bundle.llm_model,
+        suno_model=bundle.suno_model,
     )
 
 
@@ -855,139 +896,6 @@ async def handle_terminal(
         )
 
 
-# ---------- step 5: scheduled (headless) flow ----------
-
-
-async def run_scheduled_song_for_chat(bot: Bot, chat_id: int) -> None:
-    """Cron entry point: generate the song-of-the-day for one chat and
-    post it **into that same chat**.
-
-    Differences from the manual ``/song_now`` flow:
-
-    - No admin DM. The status placeholder and the final mp3 both live
-      in the target group (``placeholder_chat_id == audio_chat_id``).
-    - ``requested_by`` is ``None`` — there's no human behind it.
-    - On ``too_few_messages`` we skip **silently** (just a log line).
-      Posting "не хватило сообщений" into the group every quiet day
-      would be spam; the absence of a song is signal enough.
-    - We do the LLM + Suno-submit work *before* posting anything, so a
-      quiet day or a misconfiguration never leaves a dangling
-      "готовлю…" message in the group.
-
-    Runs to completion (awaits the Suno poll, up to ``TASK_TIMEOUT_SEC``)
-    so APScheduler's ``max_instances=1`` / ``coalesce`` semantics keep
-    overlapping fires from stacking.
-    """
-    async with SessionLocal() as session:
-        chat = await session.get(Chat, chat_id)
-        if chat is None:
-            log.info("scheduled-song: chat %s gone, skipping", chat_id)
-            return
-        if not chat.is_active or not chat.song_enabled:
-            log.info(
-                "scheduled-song: chat %s not active/enabled, skipping",
-                chat_id,
-            )
-            return
-
-        # Dedup (intent of spec 4.4): don't post a second song the same
-        # day if a manual /song_now or an earlier cron fire already
-        # produced one. "Today" is in the scheduler's TZ.
-        tz = ZoneInfo(settings.tz)
-        day_start_local = datetime.now(tz).replace(
-            hour=0, minute=0, second=0, microsecond=0
-        )
-        day_start_utc = day_start_local.astimezone(timezone.utc)
-        day_end_utc = (day_start_local + timedelta(days=1)).astimezone(
-            timezone.utc
-        )
-        if await has_song_on_date(
-            session,
-            chat_id=chat_id,
-            day_start_utc=day_start_utc,
-            day_end_utc=day_end_utc,
-        ):
-            log.info(
-                "scheduled-song: chat %s already has a song today, skipping",
-                chat_id,
-            )
-            return
-
-        try:
-            result = await start_song_generation(
-                session=session,
-                chat_id=chat_id,
-                requested_by=None,
-            )
-        except SongPipelineError as exc:
-            if exc.code == "too_few_messages":
-                log.info(
-                    "scheduled-song: chat %s too few messages, skipping "
-                    "silently",
-                    chat_id,
-                )
-            else:
-                log.warning(
-                    "scheduled-song: chat %s refused code=%s msg=%s",
-                    chat_id,
-                    exc.code,
-                    exc.msg,
-                )
-            return
-        except Exception:  # noqa: BLE001
-            log.exception(
-                "scheduled-song: unexpected error for chat %s", chat_id
-            )
-            return
-
-        suno_key = await get_suno_api_key(session)
-        if not suno_key:
-            log.warning(
-                "scheduled-song: suno key vanished mid-run for chat %s",
-                chat_id,
-            )
-            return
-
-    # Generation accepted by Suno — now it's worth telling the group.
-    try:
-        placeholder = await bot.send_message(
-            chat_id,
-            "🎵 <b>Песня дня готовится…</b>\n"
-            f"📊 По {result.n_messages} сообщениям за сутки.\n"
-            "Обычно занимает 2–3 минуты.",
-        )
-    except Exception:  # noqa: BLE001
-        log.exception(
-            "scheduled-song: can't post placeholder to chat %s", chat_id
-        )
-        return
-
-    await watch_suno_task(
-        bot=bot,
-        api_key=suno_key,
-        task_id=result.suno_task_id,
-        placeholder_chat_id=chat_id,
-        placeholder_message_id=placeholder.message_id,
-        audio_chat_id=chat_id,
-        requested_by=None,
-        suno_model=result.suno_model,
-        prompt=result.draft.lyrics,
-        title=result.draft.title,
-        style=result.draft.style,
-        lyrics=result.draft.lyrics,
-        chat_id_for_song=chat_id,
-        post_lyrics_on_failure=True,
-    )
-
-    # Best-effort bookkeeping — record the last successful scheduled run.
-    with contextlib.suppress(Exception):
-        async with SessionLocal() as session:
-            chat = await session.get(Chat, chat_id)
-            if chat is not None:
-                chat.last_song_sent_at = datetime.now(timezone.utc)
-                await session.commit()
-
-
 __all__ = [
     "DEFAULT_MIN_MESSAGES",
     "DEFAULT_WINDOW_HOURS",
@@ -996,10 +904,11 @@ __all__ = [
     "SongGenerationResult",
     "SongPipelineError",
     "build_chat_text",
+    "DraftBundle",
     "collect_recent_messages",
     "handle_terminal",
+    "generate_song_draft",
     "llm_make_song_draft",
-    "run_scheduled_song_for_chat",
     "start_song_generation",
     "trim_chat_text",
     "watch_suno_task",
