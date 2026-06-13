@@ -14,6 +14,7 @@ def home_keyboard(chat_count: int, admin_count: int) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="💡 Идеи", callback_data="ideas:filter:new")],
             [InlineKeyboardButton(text=f"👥 Админы ({admin_count})", callback_data="admin:list")],
             [InlineKeyboardButton(text="🌙 Тишина", callback_data="qh:open")],
+            [InlineKeyboardButton(text="🎵 Suno API", callback_data="suno:home")],
         ]
     )
 

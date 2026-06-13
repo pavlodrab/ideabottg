@@ -25,3 +25,15 @@ class AdminReply(StatesGroup):
 
 class QuietHoursEdit(StatesGroup):
     waiting_window = State()
+
+
+class SunoApiKeyEditing(StatesGroup):
+    waiting_key = State()
+
+
+class SunoTestPrompt(StatesGroup):
+    waiting_prompt = State()
+
+
+class MusicCustomStyle(StatesGroup):
+    waiting_text = State()
