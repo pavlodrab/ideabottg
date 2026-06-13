@@ -103,7 +103,13 @@ async def receive_idea_text(message: Message, state: FSMContext) -> None:
         await message.answer(f"Слишком длинно. Уложись в {MAX_IDEA_LEN} символов.")
         return
 
-    await state.update_data(text=text)
+    # Remember where the user typed the idea — so the admin's later
+    # reply can be sent right here, as a Telegram-reply to this message.
+    await state.update_data(
+        text=text,
+        from_chat_id=message.chat.id,
+        from_message_id=message.message_id,
+    )
     await state.set_state(IdeaSubmission.waiting_tag)
     await message.answer(
         "🏷 <b>Какого типа эта идея?</b>",
@@ -176,6 +182,8 @@ async def receive_anonymity(
     chat_id = data.get("chat_id")
     chat_title = data.get("chat_title")
     tag = data.get("tag", DEFAULT_TAG)
+    from_chat_id = data.get("from_chat_id")
+    from_message_id = data.get("from_message_id")
 
     idea = await create_idea(
         session,
@@ -185,6 +193,8 @@ async def receive_anonymity(
         text=text,
         is_anonymous=is_anonymous,
         tag=tag,
+        from_chat_id=from_chat_id,
+        from_message_id=from_message_id,
     )
     await state.clear()
 
@@ -262,6 +272,8 @@ async def capture_in_chat_reply(
         text=text,
         is_anonymous=False,
         tag=DEFAULT_TAG,
+        from_chat_id=message.chat.id,
+        from_message_id=message.message_id,
     )
 
     if chat.auto_publish:
@@ -382,7 +394,7 @@ async def _start_reply_flow(
 async def receive_reply_text(
     message: Message, state: FSMContext, bot: Bot, session: AsyncSession
 ) -> None:
-    text = (message.text_html or message.text or "").strip()
+    text = (message.html_text or message.text or "").strip()
     if text.startswith("/"):
         return
     if len(text) < 1:
@@ -409,15 +421,38 @@ async def receive_reply_text(
     if len(preview) > 120:
         preview = preview[:120] + "…"
 
+    reply_body = (
+        f"💬 <b>Ответ на твою идею #{idea.id}</b>\n\n"
+        f"{text}\n\n"
+        f"━━━━━━━━━━━━\n"
+        f"<i>Идея: «{html.escape(preview)}»</i>"
+    )
+
     delivered = True
+    sent_in_source = False
     try:
-        await bot.send_message(
-            author_id,
-            f"💬 <b>Ответ на твою идею #{idea.id}</b>\n\n"
-            f"{text}\n\n"
-            f"━━━━━━━━━━━━\n"
-            f"<i>Идея: «{html.escape(preview)}»</i>",
-        )
+        # Preferred path: reply right in the chat where the user typed
+        # the idea, as a Telegram-reply to that very message. Old ideas
+        # (submitted before we tracked origin) and ones whose source
+        # message was deleted fall back to a plain DM to the author.
+        if idea.from_chat_id is not None and idea.from_message_id is not None:
+            try:
+                await bot.send_message(
+                    idea.from_chat_id,
+                    reply_body,
+                    reply_to_message_id=idea.from_message_id,
+                    allow_sending_without_reply=True,
+                )
+                sent_in_source = True
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "reply for idea %s in source chat %s failed (%s); "
+                    "falling back to author DM",
+                    idea_id, idea.from_chat_id, exc,
+                )
+                await bot.send_message(author_id, reply_body)
+        else:
+            await bot.send_message(author_id, reply_body)
     except Exception as exc:  # noqa: BLE001
         log.warning("deliver reply for idea %s to user %s failed: %s", idea_id, author_id, exc)
         delivered = False
@@ -425,8 +460,11 @@ async def receive_reply_text(
     await state.clear()
 
     if delivered:
+        location = (
+            "в чат, где была подана идея" if sent_in_source else "в личку автору"
+        )
         await message.answer(
-            f"✅ Ответ отправлен автору идеи #{idea.id}."
+            f"✅ Ответ отправлен {location} (идея #{idea.id})."
         )
     else:
         await message.answer(

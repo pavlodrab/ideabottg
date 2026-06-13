@@ -21,8 +21,12 @@ print(">>> app.main: imports complete", flush=True)
 
 async def on_startup() -> None:
     """One-time bootstrap on bot start."""
+    # Local import to keep on_startup self-contained at module level.
+    from app.services.quiet_hours import load_from_db as load_quiet_hours
+
     async with SessionLocal() as session:
         await ensure_owner(session, settings.owner_id)
+        await load_quiet_hours(session)
 
 
 def _install_signal_logging() -> None:

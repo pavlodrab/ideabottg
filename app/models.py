@@ -84,6 +84,12 @@ class Idea(Base):
     is_anonymous: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     status: Mapped[str] = mapped_column(String(16), default="new", nullable=False)
     tag: Mapped[str] = mapped_column(String(16), default="other", nullable=False)
+    # Where the user actually typed the idea — used so admin replies can
+    # be sent back to that very chat as a Telegram-reply to the original
+    # message. For DM submissions this is the user's private chat with
+    # the bot; for in-chat replies to the bot's prompt it's the group.
+    from_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    from_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     published_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     published_message_id: Mapped[int | None] = mapped_column(
         BigInteger, nullable=True

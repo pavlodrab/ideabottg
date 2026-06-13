@@ -1,6 +1,5 @@
 from urllib.parse import urlparse
 
-from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -31,12 +30,20 @@ class Settings(BaseSettings):
     tz: str = "Europe/Kyiv"
     log_level: str = "INFO"
 
-    # Quiet hours / night mode. Bot suppresses *proactive* messages
-    # (scheduled prompts, broadcasts, reminders) during this window.
-    # Times are HH:MM in the timezone above; window may wrap midnight.
-    quiet_hours_enabled: bool = Field(default=True, alias="QUIET_HOURS_ENABLED")
-    quiet_hours_start: str = Field(default="23:00", alias="QUIET_HOURS_START")
-    quiet_hours_end: str = Field(default="08:00", alias="QUIET_HOURS_END")
+    # Optional Redis URL for persistent FSM storage. When unset (e.g. in
+    # local dev), the bot falls back to in-memory storage which is fine
+    # for testing but loses every active FSM state on each restart —
+    # that breaks any "click button → bot asks for input → user replies"
+    # flow whenever Railway redeploys between the click and the reply.
+    redis_url: str | None = None
+
+    # Quiet hours / night mode. These are *initial defaults only* —
+    # admins can change them at runtime via /quiet, and the live values
+    # are persisted in the `settings` key-value table. Times are HH:MM
+    # in the timezone above; the window may wrap midnight.
+    quiet_hours_enabled: bool = True
+    quiet_hours_start: str = "23:00"
+    quiet_hours_end: str = "08:00"
 
     @property
     def async_database_url(self) -> str:

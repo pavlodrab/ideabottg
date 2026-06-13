@@ -1,6 +1,7 @@
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.models import Admin, Chat
+from app.services.quiet_hours import QUIET_HOURS_PRESET_ROWS, get_state as get_qh_state
 from app.services.schedules import PRESETS
 
 CHATS_PER_PAGE = 6
@@ -12,9 +13,49 @@ def home_keyboard(chat_count: int, admin_count: int) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text=f"📋 Чаты ({chat_count})", callback_data="chat:list:0")],
             [InlineKeyboardButton(text="💡 Идеи", callback_data="ideas:filter:new")],
             [InlineKeyboardButton(text=f"👥 Админы ({admin_count})", callback_data="admin:list")],
+            [InlineKeyboardButton(text="🌙 Тишина", callback_data="qh:open")],
             [InlineKeyboardButton(text="🎵 Suno API", callback_data="suno:home")],
         ]
     )
+
+
+def quiet_hours_keyboard() -> InlineKeyboardMarkup:
+    """Render the quiet-hours admin panel keyboard.
+
+    Layout:
+        [ toggle (🟢/🔴) ]
+        [ preset 1 ] [ preset 2 ]
+        [ preset 3 ] [ preset 4 ]
+        [ ⌨️ Свой промежуток ]
+        [ 🏠 Главное меню ]
+    """
+    s = get_qh_state()
+    rows: list[list[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton(
+                text="🔴 Выключить" if s.enabled else "🟢 Включить",
+                callback_data="qh:toggle",
+            )
+        ]
+    ]
+    # Two presets per row to keep the panel compact.
+    row: list[InlineKeyboardButton] = []
+    for key, label in QUIET_HOURS_PRESET_ROWS:
+        row.append(
+            InlineKeyboardButton(text=label, callback_data=f"qh:preset:{key}")
+        )
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append(
+        [InlineKeyboardButton(text="⌨️ Свой промежуток", callback_data="qh:custom")]
+    )
+    rows.append(
+        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="home")]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def chats_list_keyboard(chats: list[Chat], page: int) -> InlineKeyboardMarkup:

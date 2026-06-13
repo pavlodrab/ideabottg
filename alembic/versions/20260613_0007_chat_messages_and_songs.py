@@ -1,7 +1,7 @@
 """chat_messages, songs, chats.song_style
 
-Revision ID: 0006_chat_messages_and_songs
-Revises: 0005_voting
+Revision ID: 0007_chat_messages_and_songs
+Revises: 0006_ideas_origin
 Create Date: 2026-06-13
 
 Adds two new tables:
@@ -18,14 +18,19 @@ Adds two new tables:
 
 Also adds ``chats.song_style`` so admins can pick a default style for
 each chat through ``/musicmenu``.
+
+Revision chain: this comes AFTER ``0006_ideas_origin`` (PR #24, admin
+reply lands in source chat). The two were originally written in
+parallel and both said ``down_revision = "0005_voting"``; this one was
+re-pointed at merge time to keep the chain linear.
 """
 from typing import Sequence, Union
 
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0006_chat_messages_and_songs"
-down_revision: Union[str, None] = "0005_voting"
+revision: str = "0007_chat_messages_and_songs"
+down_revision: Union[str, None] = "0006_ideas_origin"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
