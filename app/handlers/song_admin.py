@@ -39,8 +39,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.models import Chat
-from app.services.admins import is_admin
+from app.services.admins import is_admin, is_owner
 from app.services.chats import list_chats
+from app.services.chat_messages import count_messages, purge_chat_history
+from app.services.songs import song_stats
 from app.services.song_pipeline import (
     DEFAULT_MIN_MESSAGES,
     SongPipelineError,
@@ -432,8 +434,143 @@ async def cb_gen_run_in_chat(
     await callback.answer("🎵 Запустил")
 
 
-# ---------- daily-song schedule submenu ----------
+# ---------- /song_stats ----------
 
+@router.message(Command("song_stats"), F.chat.type == ChatType.PRIVATE)
+async def cmd_song_stats(message: Message, session: AsyncSession) -> None:
+    if not await _require_admin(message, session):
+        return
+    stats = await song_stats(session, days=30)
+    lines = [
+        "📊 <b>Статистика песен</b>",
+        "",
+        f"🎵 Всего: <b>{stats['total']}</b>",
+        f"🗓 За {stats['days']} дней: <b>{stats['recent']}</b>",
+    ]
+
+    if stats["by_chat"]:
+        lines.append("")
+        lines.append("<b>По чатам (за период):</b>")
+        for chat_id, count in stats["by_chat"]:
+            label = "—" if chat_id is None else f"<code>{chat_id}</code>"
+            lines.append(f"• {label}: {count}")
+
+    # Distribution incl. non-success rows, if any ever get stored.
+    non_success = [
+        (st, c) for st, c in stats["by_status"] if st != "success"
+    ]
+    if non_success:
+        lines.append("")
+        lines.append("<b>Не-success статусы (за период):</b>")
+        for st, count in non_success:
+            lines.append(f"• <code>{html.escape(st)}</code>: {count}")
+
+    await message.answer("\n".join(lines))
+
+
+# ---------- /song_purge ----------
+
+@router.message(Command("song_purge"), F.chat.type == ChatType.PRIVATE)
+async def cmd_song_purge(
+    message: Message, command: CommandObject, session: AsyncSession
+) -> None:
+    """OWNER-only: wipe captured chat_messages for one chat (N1.3).
+
+    Two-step: this shows a count + inline confirm. Songs are NOT
+    deleted — only the raw message history the summarizer reads.
+    """
+    user = message.from_user
+    if user is None or not await is_owner(session, user.id):
+        # Stay quiet-ish: only the owner gets to use this.
+        if user is not None and await is_admin(session, user.id):
+            await message.answer("🔒 Только владелец бота может чистить историю.")
+        return
+
+    raw = (command.args or "").strip()
+    if not raw:
+        await message.answer(
+            "Использование: <code>/song_purge &lt;chat_id&gt;</code>\n\n"
+            "Удаляет всю захваченную историю сообщений этого чата "
+            "(таблица <code>chat_messages</code>). Песни не трогаются."
+        )
+        return
+    try:
+        chat_id = int(raw)
+    except ValueError:
+        await message.answer("⚠️ chat_id должен быть числом.")
+        return
+
+    chat = await session.get(Chat, chat_id)
+    if chat is None:
+        await message.answer("⚠️ Такого чата нет в базе.")
+        return
+
+    n = await count_messages(session, chat_id=chat_id)
+    title = html.escape(chat.title or str(chat_id))
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"🗑 Да, удалить {n}",
+                    callback_data=f"song:purge_yes:{chat_id}",
+                ),
+                InlineKeyboardButton(
+                    text="⬅️ Отмена",
+                    callback_data="song:purge_no",
+                ),
+            ]
+        ]
+    )
+    await message.answer(
+        f"⚠️ <b>Удалить историю чата?</b>\n"
+        f"📍 {title}\n\n"
+        f"Будет удалено сообщений: <b>{n}</b>.\n"
+        "Это необратимо. Песни (mp3/тексты) останутся.",
+        reply_markup=keyboard,
+    )
+
+
+@router.callback_query(F.data == "song:purge_no")
+async def cb_song_purge_no(
+    callback: CallbackQuery, session: AsyncSession
+) -> None:
+    if isinstance(callback.message, Message):
+        with contextlib.suppress(Exception):
+            await callback.message.edit_text("Отменено. История не тронута.")
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("song:purge_yes:"))
+async def cb_song_purge_yes(
+    callback: CallbackQuery, session: AsyncSession
+) -> None:
+    user = callback.from_user
+    if user is None or not await is_owner(session, user.id):
+        await callback.answer("Только владелец", show_alert=True)
+        return
+    try:
+        chat_id = int((callback.data or "").split(":")[2])
+    except (ValueError, IndexError):
+        await callback.answer()
+        return
+
+    deleted = await purge_chat_history(session, chat_id)
+    log.info(
+        "song_purge: owner=%s wiped %d chat_messages for chat=%s",
+        user.id,
+        deleted,
+        chat_id,
+    )
+    if isinstance(callback.message, Message):
+        with contextlib.suppress(Exception):
+            await callback.message.edit_text(
+                f"🗑 Удалено сообщений: <b>{deleted}</b>.\n"
+                "История чата очищена."
+            )
+    await callback.answer("Готово")
+
+
+# ---------- daily-song schedule submenu ----------
 @router.callback_query(F.data.startswith("music:song_sched:"))
 async def cb_song_sched_open(
     callback: CallbackQuery, session: AsyncSession

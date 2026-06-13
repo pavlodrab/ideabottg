@@ -19,16 +19,17 @@
 | 2 | LLM-абстракция: OpenRouter-клиент, таблица `llm_models`, рантайм-управление через `/menu` | `[ ]` | 0 | 0 | 6 |
 | 3 | Summarizer + songwriter: map-reduce, JSON-парсинг с ретраями, dry-run `/song_test` | `[ ]` | 0 | 0 | 4 |
 | 4 | Song-провайдер + оркестратор: миграция `daily_songs`, SunoApiOrgProvider+SunoSelfHosted+LyricsOnly, `daily_song.py`, `/song_now`, scheduler-job, постинг в чат | `[ ]` | 0 | 0 | 7 |
-| 5 | Полировка: `/song_stats`, `/song_purge`, alert при первом включении, sweep `stale_on_restart` | `[ ]` | 0 | 0 | 4 |
+| 5 | Полировка: `/song_stats`, `/song_purge`, alert при первом включении, sweep `stale_on_restart` | `[~]` | 1 | 2 | 4 |
 | 6 | Опционально: тесты-смоук, retention-cron, обложка mp3 | `[ ]` | 0 | 0 | 3 |
 
-**Итого**: 29 / 4 / 57
+**Итого**: 30 / 6 / 57
 
 ## Открытые PR
 
 | PR | Ветка | Фаза | Описание |
 |----|-------|------|----------|
 | [#30](https://github.com/pavlodrab/ideabottg/pull/30) | `feat/scheduled-daily-song` | E | автоматическая «Песня дня» по расписанию: per-chat opt-in + cron-job поверх `song_pipeline`, UI расписания в per-chat `/musicmenu` |
+| _TBD_ | `feat/song-stats-purge` | 5 | `/song_stats` + `/song_purge` (OWNER, с подтверждением); стек поверх PR #30 |
 
 ---
 
@@ -149,10 +150,12 @@ vse cherez bota nastroit»). Никаких env-переменных для Suno
 
 ## Фаза 5 — Полировка
 
-- [ ] **5.1** `/song_stats` — счётчики статусов за 30 дней, по чатам.
-- [ ] **5.2** `/song_purge <chat_id>` — удаление истории чата с inline-confirm. Только OWNER.
-- [ ] **5.3** Sweep при старте (F8.3): `daily_songs` со статусом `queued`/`generating` старше 24ч → `failed, error="stale_on_restart"`.
-- [ ] **5.4** Маскировать `OPENROUTER_API_KEY` и `SUNO_API_BASE` в логах (расширить `database_url_masked`-подход).
+> **5.1 / 5.2 — в [PR #TBD](https://github.com/pavlodrab/ideabottg) (`feat/song-stats-purge`).** 5.4 уже закрыт ранее (`mask_key` в #26/#28). 5.3 неприменим в текущем MVP.
+
+- [~] **5.1** `/song_stats` (DM, admin) — `songs.song_stats(days=30)`: всего песен, за 30 дней, топ-10 по чатам, распределение не-success статусов.
+- [~] **5.2** `/song_purge <chat_id>` (только OWNER) — `chat_messages.purge_chat_history`, inline-confirm с числом сообщений. Песни не трогаются (N1.3).
+- [ ] **5.3** ~~Sweep при старте (F8.3): `daily_songs` queued/generating старше 24ч → failed~~ — **N/A в MVP**: таблицы `daily_songs` нет, `songs` пишется только на success. Вернётся, если появится `daily_songs` (post-MVP).
+- [x] **5.4** Маскирование API-ключей в логах — закрыто: `mask_key` в `app/services/suno.py` и `app/services/llm.py` используется во всех лог-строках с ключом; сырой ключ нигде не логируется. _(PR [#26](https://github.com/pavlodrab/ideabottg/pull/26) — merged, [#28](https://github.com/pavlodrab/ideabottg/pull/28) — merged)_
 
 ---
 

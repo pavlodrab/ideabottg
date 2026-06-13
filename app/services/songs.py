@@ -184,3 +184,81 @@ async def count_songs_for_user(
 
 async def get_song(session: AsyncSession, song_id: int) -> Song | None:
     return await session.get(Song, song_id)
+
+
+# ---------- stats ----------
+
+async def song_stats(
+    session: AsyncSession, *, days: int = 30
+) -> dict:
+    """Aggregate counts for ``/song_stats``.
+
+    Returns a dict with:
+
+    - ``total``        — all successful songs ever.
+    - ``recent``       — successful songs in the last ``days`` days.
+    - ``by_chat``      — list of ``(chat_id, count)`` over the window,
+                         most-active first (top 10).
+    - ``by_status``    — list of ``(status, count)`` over the window
+                         (distribution incl. non-success rows, if any).
+    - ``days``         — the window passed in (for the caption).
+
+    Computed in Python-side datetimes (not SQL INTERVAL) so it works on
+    both PostgreSQL and SQLite.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+
+    total = int(
+        (
+            await session.execute(
+                select(func.count(Song.id)).where(
+                    Song.status == VISIBLE_STATUS
+                )
+            )
+        ).scalar()
+        or 0
+    )
+
+    recent = int(
+        (
+            await session.execute(
+                select(func.count(Song.id)).where(
+                    Song.status == VISIBLE_STATUS,
+                    Song.created_at >= since,
+                )
+            )
+        ).scalar()
+        or 0
+    )
+
+    by_chat_rows = (
+        await session.execute(
+            select(Song.chat_id, func.count(Song.id))
+            .where(
+                Song.status == VISIBLE_STATUS,
+                Song.created_at >= since,
+            )
+            .group_by(Song.chat_id)
+            .order_by(func.count(Song.id).desc())
+            .limit(10)
+        )
+    ).all()
+
+    by_status_rows = (
+        await session.execute(
+            select(Song.status, func.count(Song.id))
+            .where(Song.created_at >= since)
+            .group_by(Song.status)
+            .order_by(func.count(Song.id).desc())
+        )
+    ).all()
+
+    return {
+        "total": total,
+        "recent": recent,
+        "by_chat": [(cid, int(c)) for cid, c in by_chat_rows],
+        "by_status": [(st, int(c)) for st, c in by_status_rows],
+        "days": days,
+    }

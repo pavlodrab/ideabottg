@@ -134,3 +134,18 @@ async def delete_older_than(
 def cutoff_for_retention(days: int = RETENTION_DAYS) -> datetime:
     """UTC timestamp ``days`` days ago. Used by the scheduler job."""
     return datetime.now(timezone.utc) - timedelta(days=days)
+
+
+async def purge_chat_history(session: AsyncSession, chat_id: int) -> int:
+    """Delete ALL captured messages for one chat. Returns rows deleted.
+
+    Used by ``/song_purge`` (OWNER-only) to honour a "stop collecting /
+    forget what you have" request for a specific chat — see requirement
+    N1.3. Songs (the ``songs`` table) are intentionally NOT touched;
+    this only clears the raw ``chat_messages`` history the daily-song
+    summarizer reads from.
+    """
+    stmt = delete(ChatMessage).where(ChatMessage.chat_id == chat_id)
+    result = await session.execute(stmt)
+    await session.commit()
+    return int(result.rowcount or 0)
