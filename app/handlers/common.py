@@ -57,6 +57,7 @@ async def cmd_help(message: Message, session: AsyncSession) -> None:
         "• /llm — OpenRouter (ключ, модель, system prompt, тест)\n"
         "• /logs — последние логи бота\n\n"
         "<b>Открыто всем</b>\n"
+        "• /music &lt;текст&gt; [стиль X] — сделать песню по своему тексту\n"
         "• /musiclist — архив сгенерированных песен\n\n"
         "<b>Шорткаты</b>\n"
         "• /pause &lt;chat_id&gt; — пауза\n"

@@ -21,9 +21,10 @@
 | 4 | Song-провайдер + оркестратор: миграция `daily_songs`, SunoApiOrgProvider+LyricsOnly, `daily_song.py`, `/song_now`, scheduler-job, постинг в чат | `[~]` | 1 | 6 | 7 |
 | 5 | Полировка: `/song_stats`, `/song_purge`, alert при первом включении, sweep `stale_on_restart` | `[~]` | 1 | 3 | 4 |
 | F | Dedup по дню + LyricsOnly fallback + обложка mp3 + pytest smoke-сьют | `[~]` | 0 | 4 | 4 |
+| H | Публичная `/music <текст> [стиль]`: LLM улучшает рифмы + Suno, песня в чат | `[~]` | 0 | 3 | 3 |
 | 6 | Опционально: тесты-смоук, retention-cron, обложка mp3 | `[ ]` | 0 | 0 | 3 |
 
-**Итого**: 32 / 17 / 61
+**Итого**: 32 / 20 / 64
 
 > Из 61 задачи **superseded MVP-архитектурой** (Фазы C/D): 9 (вся Фаза 2 кроме
 > 2.4 + вся Фаза 3). **N/A**: 6.2 (retention уже 2 дня). Остальное реализовано
@@ -42,6 +43,7 @@
 | [#31](https://github.com/pavlodrab/ideabottg/pull/31) | `feat/song-stats-purge` | 5 | `/song_stats` + `/song_purge` (OWNER, с подтверждением); стек поверх PR #30 |
 | [#32](https://github.com/pavlodrab/ideabottg/pull/32) | `feat/song-dedup-fallback-tests` | F · 4 · 6 | dedup по дню + LyricsOnly fallback + обложка mp3 + pytest smoke-сьют; стек поверх PR #31 |
 | [#33](https://github.com/pavlodrab/ideabottg/pull/33) | `feat/daily-songs-ledger` | 4 · 5.3 | ledger `daily_songs` (миграция 0009 + модель) + provider-абстракция `song_provider.py` + оркестратор `daily_song.py` + sweep `stale_on_restart`; стек поверх PR #32 |
+| _TBD_ | `feat/public-music-command` | H | публичная `/music <текст> [стиль]` — LLM причёсывает рифмы + Suno, mp3 в чат; стек поверх PR #33 |
 
 ---
 
@@ -393,6 +395,33 @@ MVP без scheduler — только manual trigger из меню или ком
 - Таблица `daily_songs` + дедуп по `(chat_id, date_msk)` — повторный ручной запуск в тот же день не блокируется.
 - `LyricsOnlyProvider` fallback на отказ Suno.
 - Sweep «зависших» запусков при рестарте (F8.3) и `/song_stats` — это Фаза 5.
+
+---
+
+## Фаза H — Публичная `/music` (песня по тексту пользователя)
+
+> **Все задачи ниже — в открытом PR (`feat/public-music-command`), стек поверх PR #33.** После мерджа `[~]` → `[x]`.
+
+Запрошено владельцем:
+> «Надо сделать чтобы генерил песню по запросам юзеров и по их промптам,
+> пример `/music Андрюха крутой чек пук стиль панк`. Но могут юзеры и без
+> стиля — тогда прогонять текст через нейронку (OpenRouter), чтобы улучшил
+> рифмы.»
+
+Любой участник чата (не только админ) вызывает `/music <текст>` и
+получает песню. Текст всегда прогоняется через songwriter-модель
+OpenRouter (причёсывает рифмы, добавляет структуру, сохраняя смысл и
+имена). Стиль — опционально в конце команды; без него модель выбирает
+сама по тону.
+
+- [~] **H.1** `song_pipeline`: вынесен общий `_llm_draft_with_retries`; добавлены `_build_prompt_user_message`, `prompt_to_song_draft` (улучшение текста → `SongDraft`) и сервис `start_song_from_prompt` (ключи → LLM → Suno submit). _(PR `feat/public-music-command`)_
+- [~] **H.2** `app/handlers/song_admin.py::cmd_music` — публичная `/music` (group + DM, без admin-gate): `parse_music_command` (маркеры `стиль` / `в стиле` / `style`), per-user in-memory cooldown (180 c) + лимит длины 800, placeholder → `watch_suno_task` (mp3 в тот же чат, обложка/lyrics/fallback из общего кода). _(PR `feat/public-music-command`)_
+- [~] **H.3** Тесты `tests/test_music_command.py`: парсер стиля (incl. last-marker / no-idea кейсы) + содержимое prompt-сообщения. _(PR `feat/public-music-command`)_
+
+**Definition of done фазы H**:
+1. `/music Андрюха крутой стиль панк` → через 2–3 мин mp3 в чате, стиль панк.
+2. `/music песня про субботнее утро` (без стиля) → LLM сам подбирает стиль, рифмы причёсаны.
+3. Спам ограничен кулдауном; при отказе (нет ключа / ошибка) кулдаун сбрасывается, юзер видит причину.
 
 ---
 

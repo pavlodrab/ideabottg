@@ -25,6 +25,8 @@ import asyncio
 import contextlib
 import html
 import logging
+import re
+import time
 
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatType
@@ -46,6 +48,7 @@ from app.services.songs import song_stats
 from app.services.song_pipeline import (
     DEFAULT_MIN_MESSAGES,
     SongPipelineError,
+    start_song_from_prompt,
     start_song_generation,
     watch_suno_task,
 )
@@ -54,6 +57,41 @@ from app.services.suno import get_api_key as get_suno_api_key
 log = logging.getLogger(__name__)
 
 router = Router(name="song_admin")
+
+
+# ---------- public /music (user prompt → song) ----------
+
+# Per-user cooldown for /music. In-memory (single-instance bot): enough
+# to stop rapid-fire spam that would burn Suno credits. Reset on a
+# failed attempt so a config error doesn't lock the user out.
+MUSIC_COOLDOWN_SEC = 180
+# Hard cap on the user's prompt length before the LLM call.
+MUSIC_MAX_LEN = 800
+_last_music_at: dict[int, float] = {}
+
+# Matches a trailing style marker: "... стиль панк" / "... в стиле lo-fi"
+# / "... style punk". The part before the marker is the lyric idea.
+_STYLE_RE = re.compile(
+    r"\s+(?:в\s+стиле|стиль|style)\s+(.+?)\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def parse_music_command(text: str) -> tuple[str, str | None]:
+    """Split ``/music`` args into ``(idea, style|None)``.
+
+    A trailing ``стиль X`` / ``в стиле X`` / ``style X`` sets the style;
+    everything before it is the lyric idea. If the marker leaves no idea
+    before it, the whole text is treated as the idea (no style).
+    """
+    text = (text or "").strip()
+    m = _STYLE_RE.search(text)
+    if m:
+        idea = text[: m.start()].strip()
+        style = m.group(1).strip()
+        if idea and style:
+            return idea, style
+    return text, None
 
 
 # Daily-song time presets shown in the schedule submenu, as (HH, MM).
@@ -256,8 +294,131 @@ async def _launch_song(
     )
 
 
-# ---------- /song_now ----------
+@router.message(Command("music"), F.text)
+async def cmd_music(
+    message: Message,
+    command: CommandObject,
+    session: AsyncSession,
+    bot: Bot,
+) -> None:
+    """Public: any user generates a song from their own text.
 
+    ``/music <текст> [стиль <X>]`` — the text is run through the
+    songwriter LLM (improves rhymes / structure, keeps the user's
+    intent), then Suno. With no explicit style the LLM picks one from
+    the text's tone. Works in groups and DM; the mp3 is posted to the
+    same chat.
+    """
+    user = message.from_user
+    if user is None:
+        return
+
+    raw = (command.args or "").strip()
+    if not raw:
+        await message.answer(
+            "🎵 <b>Сгенерировать песню</b>\n\n"
+            "<code>/music &lt;текст&gt;</code> — и я сделаю из него песню.\n"
+            "Можно задать стиль в конце: "
+            "<code>стиль панк</code> / <code>в стиле lo-fi</code>.\n\n"
+            "Примеры:\n"
+            "• <code>/music Андрюха крутой, чек-пук, лучший друг стиль панк</code>\n"
+            "• <code>/music песня про субботнее утро и кофе</code> "
+            "(стиль выберу сам)\n\n"
+            "Без стиля — прогоню текст через нейронку, причешу рифмы и "
+            "подберу стиль под настроение."
+        )
+        return
+
+    if len(raw) > MUSIC_MAX_LEN:
+        await message.answer(
+            f"⚠️ Слишком длинно (лимит {MUSIC_MAX_LEN} символов). "
+            "Сократи идею — припев и пара строк куплета достаточно."
+        )
+        return
+
+    # Per-user cooldown.
+    now = time.monotonic()
+    last = _last_music_at.get(user.id)
+    if last is not None and (now - last) < MUSIC_COOLDOWN_SEC:
+        wait = int(MUSIC_COOLDOWN_SEC - (now - last)) + 1
+        await message.answer(
+            f"⏳ Не так быстро — подожди {wait} c перед следующей песней."
+        )
+        return
+    _last_music_at[user.id] = now
+
+    idea, style = parse_music_command(raw)
+
+    placeholder = await message.answer(
+        "⏳ <b>Готовлю песню по твоему тексту…</b>\n"
+        + (f"🎨 Стиль: <i>{html.escape(style)}</i>\n" if style else "")
+        + "Причёсываю рифмы и зову Suno. Обычно 2–3 минуты."
+    )
+
+    try:
+        result = await start_song_from_prompt(
+            session=session,
+            user_text=idea,
+            style_override=style,
+            requested_by=user.id,
+        )
+    except SongPipelineError as exc:
+        _last_music_at.pop(user.id, None)  # allow immediate retry after fix
+        with contextlib.suppress(Exception):
+            await placeholder.edit_text(
+                f"❌ <b>Не получилось.</b>\n\n{html.escape(exc.humanized())}"
+            )
+        return
+    except Exception as exc:  # noqa: BLE001
+        _last_music_at.pop(user.id, None)
+        log.exception("music: unexpected error for user %s", user.id)
+        with contextlib.suppress(Exception):
+            await placeholder.edit_text(
+                "❌ <b>Неожиданная ошибка.</b>\n"
+                f"<code>{html.escape(str(exc))}</code>"
+            )
+        return
+
+    placeholder_text = (
+        "🎵 <b>Песня — задача отправлена в Suno</b>\n\n"
+        f"📝 <b>{html.escape(result.draft.title)}</b>\n"
+        f"🎨 <i>{html.escape(result.draft.style[:200])}</i>\n"
+        f"🆔 task: <code>{html.escape(result.suno_task_id)}</code>\n\n"
+        "⏳ Жду готовности (обычно 2–3 минуты)…"
+    )
+    with contextlib.suppress(Exception):
+        await placeholder.edit_text(placeholder_text, disable_web_page_preview=True)
+
+    suno_key = await get_suno_api_key(session)
+    if not suno_key:
+        with contextlib.suppress(Exception):
+            await placeholder.edit_text("❌ Suno-ключ исчез после старта.")
+        return
+
+    # Group songs are tied to the chat; DM songs aren't (chat_id_for_song
+    # must be a registered chat FK or None).
+    is_group = message.chat.type in {ChatType.GROUP, ChatType.SUPERGROUP}
+    asyncio.create_task(
+        watch_suno_task(
+            bot=bot,
+            api_key=suno_key,
+            task_id=result.suno_task_id,
+            placeholder_chat_id=placeholder.chat.id,
+            placeholder_message_id=placeholder.message_id,
+            audio_chat_id=message.chat.id,
+            requested_by=user.id,
+            suno_model=result.suno_model,
+            prompt=result.draft.lyrics,
+            title=result.draft.title,
+            style=result.draft.style,
+            lyrics=result.draft.lyrics,
+            chat_id_for_song=message.chat.id if is_group else None,
+        ),
+        name=f"music:{result.suno_task_id}",
+    )
+
+
+# ---------- /song_now ----------
 @router.message(Command("song_now"), F.chat.type == ChatType.PRIVATE)
 async def cmd_song_now(
     message: Message,
