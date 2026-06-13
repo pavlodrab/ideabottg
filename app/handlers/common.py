@@ -63,6 +63,7 @@ async def cmd_help(message: Message, session: AsyncSession) -> None:
         "• /resume &lt;chat_id&gt; — снова активен\n"
         "• /setcron &lt;chat_id&gt; &lt;cron|off&gt; — расписание текстом\n"
         "• /test_prompt &lt;chat_id&gt; — отправить призыв сейчас\n"
+        "• /song_now &lt;chat_id&gt; — собрать песню дня вручную\n"
         "• /export [filter] — выгрузить CSV\n"
         "• /captured [chat_id] — статистика захваченных сообщений\n"
         "• /suno_credits — остаток кредитов на Suno\n"

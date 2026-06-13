@@ -14,13 +14,14 @@
 | 1 | Capture pipeline: миграция `chat_messages`, хэндлер-логгер, конфиг-фикс | `[~]` | 4 | 1 | 5 |
 | B | Music storage UI: `/musiclist` + `/musicmenu`, песни хранятся бессрочно | `[~]` | 0 | 4 | 4 |
 | C | Observability + unified `/musicmenu` + simplified OpenRouter + target duration | `[~]` | 0 | 7 | 7 |
+| D | Song-from-chat MVP: `song_pipeline.py` + `/song_now` + кнопка в /musicmenu | `[~]` | 0 | 5 | 5 |
 | 2 | LLM-абстракция: OpenRouter-клиент, таблица `llm_models`, рантайм-управление через `/menu` | `[ ]` | 0 | 0 | 6 |
 | 3 | Summarizer + songwriter: map-reduce, JSON-парсинг с ретраями, dry-run `/song_test` | `[ ]` | 0 | 0 | 4 |
 | 4 | Song-провайдер + оркестратор: миграция `daily_songs`, SunoApiOrgProvider+SunoSelfHosted+LyricsOnly, `daily_song.py`, `/song_now`, scheduler-job, постинг в чат | `[ ]` | 0 | 0 | 7 |
 | 5 | Полировка: `/song_stats`, `/song_purge`, alert при первом включении, sweep `stale_on_restart` | `[ ]` | 0 | 0 | 4 |
 | 6 | Опционально: тесты-смоук, retention-cron, обложка mp3 | `[ ]` | 0 | 0 | 3 |
 
-**Итого**: 5 / 19 / 48
+**Итого**: 5 / 24 / 53
 
 ## Открытые PR
 
@@ -28,6 +29,7 @@
 |----|-------|------|----------|
 | [#26](https://github.com/pavlodrab/ideabottg/pull/26) | `feat/suno-api-bot-config` | A | sunoapi.org интеграция: API-ключ/модель/тестовая генерация через `/suno` в боте |
 | [#28](https://github.com/pavlodrab/ideabottg/pull/28) | `feat/openrouter-musicmenu-logs` | C | unified `/musicmenu` (DM admin home), `/logs`, OpenRouter MVP, target song duration, MAX_TEXT_LEN=4096, oldest-row в `/captured` |
+| _TBD_ | `feat/song-from-chat-pipeline` | D | song-from-chat manual trigger: `song_pipeline.py` (LLM → SongDraft → Suno customMode), `/song_now`, кнопка «🎵 Сгенерировать песню» в /musicmenu, в per-chat menu тоже |
 
 ---
 
@@ -245,6 +247,56 @@ Phase 2 (`llm_models`) остаётся как **post-MVP расширение**
 - Постинг готовой песни в группу.
 
 Для Phase 3+ инфраструктура полностью готова: `OpenRouterClient.chat(...)` ходит в выбранную модель, `system_prompt` уже в стиле songwriter, `target_duration_sec` подставляется в Suno. Останется собрать `summarize_day` + `digest_to_song` + `daily_song.py` оркестратор поверх этого.
+
+---
+
+## Фаза D — Song-from-chat MVP (manual trigger)
+
+> **Все `[~]` задачи ниже — в PR (`feat/song-from-chat-pipeline`).** Stacked поверх PR #28; после мерджа #28 target ветка PR этой фазы перевешивается на `main`.
+
+Закрывает основную владельцеву задачу:
+> «Давай может добавим ии с опенроутера что бы она основываясь на контексте чата генерила песню».
+
+MVP без scheduler — только manual trigger из меню или команды `/song_now`. Scheduler идёт отдельной фазой (3.2 / 4 в исходном плане).
+
+- [~] **D.1** `app/services/song_pipeline.py` — оркестратор:
+  - `SongDraft` (`title/style/lyrics/summary`) и `SongGenerationResult` dataclass'ы.
+  - `SongPipelineError` с machine-кодами (`no_suno_key`, `no_llm_key`, `no_chat`, `too_few_messages`, `llm_call_failed`, `llm_invalid_json`, `llm_invalid_draft`, `suno_call_failed`) и `humanized()`.
+  - `build_chat_text(messages)` — `@username: text` строки, фильтрует пустые / без user.
+  - `trim_chat_text(text, max=100k)` — tail-bias на оверфлоу (свежие сообщения важнее).
+  - `_build_user_message(chat_text, target_seconds, style_override)` — songwriter-prompt в стиле «1 куплет + припев + 1 куплет до {N} сек», поддерживает `style_override` из `chats.song_style`.
+  - `llm_make_song_draft(...)` — один LLM-вызов с `response_format=json_object`, до 3 ретраев на bad JSON, `_tolerant_json_parse` для срывания markdown-обёрток (```json fences, leading "json") когда модель не слушается JSON-mode.
+  - `start_song_generation(session, chat_id, requested_by)` — валидация ключей → fetch `chat_messages` за 24ч → проверка минимума → LLM → Suno в `customMode=True` (передаём наши `title`/`style`/`lyrics`) → возврат `SongGenerationResult`.
+  - `watch_suno_task(...)` и `handle_terminal(...)` — портировано из `suno_admin.py`. Ключевое расширение: разделение `placeholder_chat_id` (где статус-карточка) и `audio_chat_id` (куда mp3). Этот split нужен для DM-trigger flow: статус в DM админа, mp3 в группу.
+  - `Song` row пишется с `chat_id_for_song`, `style`, `lyrics` (LLM-сгенерированными) — `/musiclist` теперь будет показывать осмысленный архив для каждого чата.
+- [~] **D.2** Refactor `suno_admin.py`:
+  - Удалён локальный `_watch_task` и `_handle_terminal` (~150 строк), вызовы редиректятся в общий `song_pipeline.watch_suno_task`. Test-Generation flow становится частным случаем (`audio_chat_id == placeholder_chat_id`).
+  - Оставлен один тонкий backwards-compat `_watch_task(...)` стаб с прежней сигнатурой — на случай если кто-то импортировал приватку.
+- [~] **D.3** `app/handlers/song_admin.py` — handlers:
+  - `/song_now <chat_id>` (DM, admin) — placeholder в DM, mp3 в group.
+  - callback `mm:gen_pick` — chat picker под новой кнопкой «🎵 Сгенерировать песню дня» в /musicmenu.
+  - callback `mm:gen:<chat_id>` — pipeline после выбора чата (placeholder = редактируется в DM, audio → group).
+  - callback `music:gen_now:<chat_id>` — версия для group context (placeholder + audio в одном чате).
+  - Регистрируется ПЕРЕД `music.router`, чтобы перехватить `music:gen_now:*` (формально namespace `music:`, но handler живёт в song_admin для группировки логики).
+- [~] **D.4** UI:
+  - `app/keyboards/musicmenu.py::musicmenu_home_keyboard` — добавлена строка с кнопкой «🎵 Сгенерировать песню дня» (callback `mm:gen_pick`).
+  - `app/keyboards/music.py::music_menu_keyboard` — внизу per-chat menu добавлена кнопка «🎵 Сгенерировать песню сейчас» (callback `music:gen_now:{chat_id}`).
+- [~] **D.5** Учёт стиля чата:
+  - Если у чата задан `chat.song_style` (любой из 12 пресетов или кастомный текст из `/musicmenu` в группе) — он становится **override**. LLM получает инструкцию «СТИЛЬ ЗАФИКСИРОВАН — используй его в `style` JSON без изменений», и тот же текст уходит в Suno как `style`.
+  - Если стиль не задан — LLM выбирает сам по тону чата (что и хотел владелец: «надо чтобы стиль автоматически выбирался»).
+
+**Definition of done фазы D**:
+1. Владелец в DM: `/musicmenu` → «🎵 Сгенерировать песню дня» → выбирает чат → видит placeholder «⏳ Готовлю…».
+2. Через ~5 секунд placeholder обновляется на «🎵 task отправлена в Suno» с заголовком, стилем и summary от LLM.
+3. Через 2-3 минуты — placeholder становится «✅ Готово!» с длительностью, в выбранном групповом чате появляется mp3 + lyrics.
+4. Альтернативно: админ в группе — `/musicmenu` → «🎵 Сгенерировать сейчас» → placeholder и mp3 в этой же группе.
+5. Альтернативно: `/song_now <chat_id>` в DM — то же что (1)+(2)+(3) минуя меню.
+
+**Что НЕ делает фаза D**:
+- Scheduler-job для автоматической ежедневной генерации (Phase 4).
+- Дедуп по дате (`daily_songs.unique(chat_id, date_msk)`) — Phase 4.
+- `LyricsOnlyProvider` fallback на отказ Suno — пока пайплайн просто отвечает ошибкой в placeholder.
+- Per-role LLM-модели (Phase 2 в исходном дизайне — `llm_models` таблица).
 
 ---
 

@@ -12,6 +12,7 @@ from app.handlers import (
     music,
     musicmenu_admin,
     quiet_hours,
+    song_admin,
     suno_admin,
     voting,
 )
@@ -37,6 +38,11 @@ def register_handlers(dp: Dispatcher) -> None:
     dp.include_router(suno_admin.router)
     dp.include_router(llm_admin.router)
     dp.include_router(logs.router)
+    # song_admin owns `/song_now` and the `mm:gen_pick / mm:gen:* /
+    # music:gen_now:*` callbacks. Order before `music` matters — the
+    # `music:gen_now:*` callback is namespaced under `music:` only by
+    # name, but its handler lives here.
+    dp.include_router(song_admin.router)
     dp.include_router(music.router)
     dp.include_router(chats.router)
     dp.include_router(common.router)
