@@ -39,7 +39,7 @@
 |----|-------|------|----------|
 | [#30](https://github.com/pavlodrab/ideabottg/pull/30) | `feat/scheduled-daily-song` | E | автоматическая «Песня дня» по расписанию: per-chat opt-in + cron-job поверх `song_pipeline`, UI расписания в per-chat `/musicmenu` |
 | [#31](https://github.com/pavlodrab/ideabottg/pull/31) | `feat/song-stats-purge` | 5 | `/song_stats` + `/song_purge` (OWNER, с подтверждением); стек поверх PR #30 |
-| _TBD_ | `feat/song-dedup-fallback-tests` | F · 4 · 6 | dedup по дню + LyricsOnly fallback + обложка mp3 + pytest smoke-сьют; стек поверх PR #31 |
+| [#32](https://github.com/pavlodrab/ideabottg/pull/32) | `feat/song-dedup-fallback-tests` | F · 4 · 6 | dedup по дню + LyricsOnly fallback + обложка mp3 + pytest smoke-сьют; стек поверх PR #31 |
 
 ---
 
@@ -200,7 +200,7 @@ vse cherez bota nastroit»). Никаких env-переменных для Suno
 
 ## Фаза F — Dedup + LyricsOnly fallback + обложка + тесты
 
-> **Все задачи ниже — в открытом PR (`feat/song-dedup-fallback-tests`), стек поверх PR #31.** После мерджа маркеры переключаются `[~]` → `[x]`.
+> **Все задачи ниже — в [PR #32](https://github.com/pavlodrab/ideabottg/pull/32) (`feat/song-dedup-fallback-tests`), стек поверх PR #31.** После мерджа маркеры переключаются `[~]` → `[x]`.
 
 Закрывает «хвост» Фазы 4 в lean-форме (без таблицы `daily_songs` и
 provider-абстракции) + опциональную Фазу 6. Всё проверено реально:
