@@ -29,7 +29,7 @@
 | PR | Ветка | Фаза | Описание |
 |----|-------|------|----------|
 | [#30](https://github.com/pavlodrab/ideabottg/pull/30) | `feat/scheduled-daily-song` | E | автоматическая «Песня дня» по расписанию: per-chat opt-in + cron-job поверх `song_pipeline`, UI расписания в per-chat `/musicmenu` |
-| _TBD_ | `feat/song-stats-purge` | 5 | `/song_stats` + `/song_purge` (OWNER, с подтверждением); стек поверх PR #30 |
+| [#31](https://github.com/pavlodrab/ideabottg/pull/31) | `feat/song-stats-purge` | 5 | `/song_stats` + `/song_purge` (OWNER, с подтверждением); стек поверх PR #30 |
 
 ---
 
@@ -150,7 +150,7 @@ vse cherez bota nastroit»). Никаких env-переменных для Suno
 
 ## Фаза 5 — Полировка
 
-> **5.1 / 5.2 — в [PR #TBD](https://github.com/pavlodrab/ideabottg) (`feat/song-stats-purge`).** 5.4 уже закрыт ранее (`mask_key` в #26/#28). 5.3 неприменим в текущем MVP.
+> **5.1 / 5.2 — в [PR #31](https://github.com/pavlodrab/ideabottg/pull/31) (`feat/song-stats-purge`).** 5.4 уже закрыт ранее (`mask_key` в #26/#28). 5.3 неприменим в текущем MVP.
 
 - [~] **5.1** `/song_stats` (DM, admin) — `songs.song_stats(days=30)`: всего песен, за 30 дней, топ-10 по чатам, распределение не-success статусов.
 - [~] **5.2** `/song_purge <chat_id>` (только OWNER) — `chat_messages.purge_chat_history`, inline-confirm с числом сообщений. Песни не трогаются (N1.3).
