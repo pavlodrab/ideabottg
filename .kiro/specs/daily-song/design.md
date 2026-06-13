@@ -165,7 +165,25 @@ X-Title:       IdeaBot Daily Song
 
 Ретраи: 3 попытки с экспонентой 1→4→16 сек на 429/5xx/timeout. Логируем `model`, `prompt_tokens`, `completion_tokens` (из ответа) для observability.
 
-### 3.3. `llm_models.py` (CRUD + активация)
+> **MVP simplification (Phase C, реализовано):** в первом релизе бот
+> работает с **одной** активной моделью OpenRouter и **одним** общим
+> system prompt — обе настройки хранятся прямо в существующей таблице
+> `settings` под ключами `llm.api_key`, `llm.model`,
+> `llm.system_prompt`, `llm.referer`. Управление — через
+> `/musicmenu → 🤖 OpenRouter` (см. `app/handlers/llm_admin.py`).
+>
+> Это означает, что `summarizer` и `songwriter` шаги Phase 3 будут
+> исполняться одной и той же моделью с одним и тем же prompt. Для
+> MVP это ок — Gemini 2.0 Flash (`google/gemini-2.0-flash-exp:free`,
+> бесплатный default) тянет оба шага в одном LLM-вызове.
+>
+> Полная схема с таблицей `llm_models` и per-role активацией ниже
+> (§3.3) остаётся как **post-MVP расширение** — мигрируем на неё, если
+> упрёмся в качество одной модели или захотим раздельные prompts.
+> Переход назад-совместимый: `llm.model` → `llm.active_summarizer` /
+> `llm.active_songwriter`, плюс новая таблица `llm_models`.
+
+### 3.3. `llm_models.py` (CRUD + активация) — post-MVP
 
 ```python
 async def list_models(session, role: str | None = None) -> list[LlmModel]: ...

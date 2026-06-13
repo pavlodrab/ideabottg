@@ -13,15 +13,14 @@ router = Router(name="common")
 async def cmd_start(message: Message, session: AsyncSession) -> None:
     user = message.from_user
     if user is not None and await is_admin(session, user.id):
+        # Admins land directly on the unified menu — same screen as
+        # /musicmenu — so the very first message they see has every
+        # control reachable in one tap.
+        from app.handlers.musicmenu_admin import build_home_view
+
+        text, kb = await build_home_view(session)
         await message.answer(
-            "🤖 <b>IdeaBot</b>\n\n"
-            "Я собираю идеи в твоих чатах.\n\n"
-            "Команды:\n"
-            "• /menu — главное меню\n"
-            "• /chats — список чатов и настройки\n"
-            "• /admins — управление админами\n"
-            "• /quiet — ночной режим (тишина)\n"
-            "• /help — справка"
+            text, reply_markup=kb, disable_web_page_preview=True
         )
         return
 
@@ -45,14 +44,18 @@ async def cmd_help(message: Message, session: AsyncSession) -> None:
 
     await message.answer(
         "🤖 <b>Команды админа</b>\n\n"
-        "<b>Меню</b>\n"
-        "• /menu — главное меню\n"
+        "<b>Главное меню</b>\n"
+        "• /musicmenu — единое меню (чаты, идеи, админы, тишина, "
+        "Suno, OpenRouter, длительность, логи)\n"
+        "• /menu — алиас на /musicmenu\n\n"
+        "<b>Прямые входы</b>\n"
         "• /chats — чаты и их настройки\n"
         "• /ideas — все идеи с фильтрами\n"
         "• /admins — управление админами\n"
         "• /quiet — ночной режим (тишина)\n"
-        "• /suno — Suno API (ключ, модель, тестовая генерация)\n"
-        "• /musicmenu — стиль песни для чата\n\n"
+        "• /suno — Suno API (ключ, модель, длительность, тестовая)\n"
+        "• /llm — OpenRouter (ключ, модель, system prompt, тест)\n"
+        "• /logs — последние логи бота\n\n"
         "<b>Открыто всем</b>\n"
         "• /musiclist — архив сгенерированных песен\n\n"
         "<b>Шорткаты</b>\n"
@@ -60,8 +63,8 @@ async def cmd_help(message: Message, session: AsyncSession) -> None:
         "• /resume &lt;chat_id&gt; — снова активен\n"
         "• /setcron &lt;chat_id&gt; &lt;cron|off&gt; — расписание текстом\n"
         "• /test_prompt &lt;chat_id&gt; — отправить призыв сейчас\n"
-        "• /export [filter] — выгрузить CSV (filter: new/starred/read/archived/all)\n"
-        "• /captured [chat_id] — сколько сообщений захвачено (24ч / всего)\n"
+        "• /export [filter] — выгрузить CSV\n"
+        "• /captured [chat_id] — статистика захваченных сообщений\n"
         "• /suno_credits — остаток кредитов на Suno\n"
         "• /suno_status &lt;task_id&gt; — статус задачи Suno\n"
         "• /cancel — отменить текущий ввод"

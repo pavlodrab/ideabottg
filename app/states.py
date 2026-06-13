@@ -37,3 +37,23 @@ class SunoTestPrompt(StatesGroup):
 
 class MusicCustomStyle(StatesGroup):
     waiting_text = State()
+
+
+class LlmApiKeyEditing(StatesGroup):
+    waiting_key = State()
+
+
+class LlmModelEditing(StatesGroup):
+    waiting_model = State()
+
+
+class LlmSystemPromptEditing(StatesGroup):
+    waiting_text = State()
+
+
+class LlmTestPrompt(StatesGroup):
+    waiting_prompt = State()
+
+
+class SunoDurationCustom(StatesGroup):
+    waiting_seconds = State()

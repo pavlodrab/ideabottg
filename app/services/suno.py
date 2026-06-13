@@ -58,6 +58,17 @@ MODEL_LABELS: dict[str, str] = {
 KEY_API_KEY = "suno.api_key"
 KEY_MODEL = "suno.model"
 KEY_CALLBACK_URL = "suno.callback_url"
+KEY_TARGET_DURATION_SEC = "suno.target_duration_sec"
+
+# Target song duration. Suno doesn't accept an explicit "duration"
+# parameter — instead we steer it through prompt hints (and, when
+# customMode lyrics are wired in, through how many verses we ask the
+# LLM to produce). The default of 150s ≈ 2:30 lands close to a typical
+# pop-song length without padding.
+DEFAULT_TARGET_DURATION_SEC = 150
+DURATION_PRESETS_SEC: tuple[int, ...] = (90, 120, 150, 180, 240)
+MIN_TARGET_DURATION_SEC = 60
+MAX_TARGET_DURATION_SEC = 480
 
 # Suno task statuses (per `record-info` endpoint).
 #
@@ -130,6 +141,72 @@ async def set_model(session: AsyncSession, model: str) -> bool:
 async def get_callback_url(session: AsyncSession) -> str:
     value = await get_setting(session, KEY_CALLBACK_URL)
     return value or DEFAULT_CALLBACK_URL
+
+
+async def get_target_duration_sec(session: AsyncSession) -> int:
+    """Target song length in seconds, clamped to the supported range.
+
+    Falls back to :data:`DEFAULT_TARGET_DURATION_SEC` (≈2:30) when the
+    setting is absent or unparseable. The value is used to compose a
+    prompt hint for Suno (see :func:`format_duration_hint`) — it's not
+    sent as a separate API parameter because Suno doesn't accept one.
+    """
+    raw = await get_setting(session, KEY_TARGET_DURATION_SEC)
+    if not raw:
+        return DEFAULT_TARGET_DURATION_SEC
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_TARGET_DURATION_SEC
+    return max(
+        MIN_TARGET_DURATION_SEC,
+        min(MAX_TARGET_DURATION_SEC, value),
+    )
+
+
+async def set_target_duration_sec(session: AsyncSession, seconds: int) -> int:
+    """Persist the target duration. Returns the value actually stored
+    (clamped to the supported range, so callers can echo it back)."""
+    clamped = max(
+        MIN_TARGET_DURATION_SEC,
+        min(MAX_TARGET_DURATION_SEC, int(seconds)),
+    )
+    await set_setting(session, KEY_TARGET_DURATION_SEC, str(clamped))
+    return clamped
+
+
+def format_duration_label(seconds: int) -> str:
+    """Render a duration as ``M:SS`` for menu buttons / status lines."""
+    seconds = max(0, int(seconds))
+    return f"{seconds // 60}:{seconds % 60:02d}"
+
+
+def format_duration_hint(seconds: int) -> str:
+    """English natural-language line appended to a Suno prompt to nudge
+    the model toward the target length.
+
+    Suno's prompt parser respects English directives more reliably than
+    Russian ones, so we keep this string in English regardless of the
+    user's prompt language.
+    """
+    label = format_duration_label(seconds)
+    return (
+        f"\n\n[Length: about {label} (~{seconds}s). Keep it concise: "
+        "single verse, chorus, single verse, short outro. "
+        "No long intro, no extended bridge.]"
+    )
+
+
+def append_duration_hint(prompt: str, seconds: int) -> str:
+    """Idempotently append a duration hint to a user prompt.
+
+    If the prompt already ends with a ``[Length: ...]`` directive
+    (e.g. user pasted one in by hand) we leave it alone so admins keep
+    fine-grained control.
+    """
+    if "[Length:" in prompt:
+        return prompt
+    return prompt.rstrip() + format_duration_hint(seconds)
 
 
 def mask_key(key: str | None) -> str:

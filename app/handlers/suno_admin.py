@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import SessionLocal
 from app.keyboards.suno import (
     suno_back_keyboard,
+    suno_duration_keyboard,
     suno_menu_keyboard,
     suno_model_keyboard,
     suno_remove_key_confirm_keyboard,
@@ -32,20 +33,31 @@ from app.services.admins import is_admin
 from app.services.songs import set_tg_file_id, upsert_song
 from app.services.suno import (
     DEFAULT_CALLBACK_URL,
+    DURATION_PRESETS_SEC,
+    MAX_TARGET_DURATION_SEC,
+    MIN_TARGET_DURATION_SEC,
     MODEL_LABELS,
     SUPPORTED_MODELS,
     SunoApiError,
     SunoApiOrgClient,
     TaskSnapshot,
+    append_duration_hint,
     clear_api_key,
+    format_duration_label,
     get_api_key,
     get_callback_url,
     get_model,
+    get_target_duration_sec,
     mask_key,
     set_api_key,
     set_model,
+    set_target_duration_sec,
 )
-from app.states import SunoApiKeyEditing, SunoTestPrompt
+from app.states import (
+    SunoApiKeyEditing,
+    SunoDurationCustom,
+    SunoTestPrompt,
+)
 
 log = logging.getLogger(__name__)
 
@@ -99,6 +111,7 @@ async def _build_menu(session: AsyncSession) -> tuple[str, object]:
     api_key = await get_api_key(session)
     model = await get_model(session)
     callback_url = await get_callback_url(session)
+    target_duration = await get_target_duration_sec(session)
 
     masked = mask_key(api_key)
     if api_key:
@@ -118,12 +131,16 @@ async def _build_menu(session: AsyncSession) -> tuple[str, object]:
         "🎵 <b>Suno API</b>  · <code>sunoapi.org</code>\n\n"
         f"{status_line}\n"
         f"🎚 Модель по умолчанию: <code>{html.escape(model)}</code>\n"
+        f"🎯 Целевая длительность: <code>"
+        f"{format_duration_label(target_duration)}</code> "
+        f"(~{target_duration} сек)\n"
         f"🔁 Callback URL: <code>{html.escape(callback_url)}</code>\n\n"
         f"{hint}"
     )
     kb = suno_menu_keyboard(
         has_api_key=bool(api_key),
         current_model=model,
+        target_duration_sec=target_duration,
     )
     return text, kb
 
@@ -332,6 +349,109 @@ async def cb_suno_model_set(
         await callback.message.edit_text(text, reply_markup=kb)
 
 
+# ---------- duration picker ----------
+
+@router.callback_query(F.data == "suno:duration_open")
+async def cb_suno_duration_open(
+    callback: CallbackQuery, session: AsyncSession
+) -> None:
+    if not await _require_admin(callback, session):
+        return
+    current = await get_target_duration_sec(session)
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text(
+            "🎯 <b>Целевая длительность песни</b>\n\n"
+            f"Сейчас: <code>{format_duration_label(current)}</code> "
+            f"(~{current} сек)\n\n"
+            "Suno не принимает параметр «длительность» напрямую — "
+            "вместо этого бот добавляет к prompt подсказку "
+            "<code>[Length: ~M:SS]</code> и просит модель уложиться в "
+            "1 куплет + припев + 1 куплет. Эффект статистический: "
+            "модели V4_5+ / V4_5all чаще попадают в цель.\n\n"
+            "Выбери пресет или задай своё значение:",
+            reply_markup=suno_duration_keyboard(current),
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("suno:duration_set:"))
+async def cb_suno_duration_set(
+    callback: CallbackQuery, session: AsyncSession
+) -> None:
+    if not await _require_admin(callback, session):
+        return
+    parts = (callback.data or "").split(":", 2)
+    if len(parts) != 3:
+        await callback.answer()
+        return
+    try:
+        seconds = int(parts[2])
+    except ValueError:
+        await callback.answer("⚠️ Неверное значение", show_alert=True)
+        return
+    stored = await set_target_duration_sec(session, seconds)
+    await callback.answer(f"✅ {format_duration_label(stored)}")
+    text, kb = await _build_menu(session)
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text(text, reply_markup=kb)
+
+
+@router.callback_query(F.data == "suno:duration_custom")
+async def cb_suno_duration_custom(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
+    if not await _require_admin(callback, session):
+        return
+    await state.set_state(SunoDurationCustom.waiting_seconds)
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text(
+            "✏️ <b>Своё значение длительности</b>\n\n"
+            f"Пришли число секунд от {MIN_TARGET_DURATION_SEC} до "
+            f"{MAX_TARGET_DURATION_SEC}.\n\n"
+            "Примеры:\n"
+            "• <code>120</code> — 2:00\n"
+            "• <code>180</code> — 3:00\n"
+            "• <code>210</code> — 3:30\n\n"
+            "Или /cancel.",
+            reply_markup=suno_back_keyboard(),
+        )
+    await callback.answer()
+
+
+@router.message(
+    SunoDurationCustom.waiting_seconds,
+    F.chat.type == ChatType.PRIVATE,
+    F.text,
+)
+async def receive_duration_custom(
+    message: Message, state: FSMContext, session: AsyncSession
+) -> None:
+    raw = (message.text or "").strip()
+    if raw.startswith("/"):
+        return
+    try:
+        seconds = int(raw)
+    except ValueError:
+        await message.answer(
+            "⚠️ Не число. Пришли целое число секунд или /cancel."
+        )
+        return
+    if not (MIN_TARGET_DURATION_SEC <= seconds <= MAX_TARGET_DURATION_SEC):
+        await message.answer(
+            f"⚠️ Вне диапазона [{MIN_TARGET_DURATION_SEC}, "
+            f"{MAX_TARGET_DURATION_SEC}]. Или /cancel."
+        )
+        return
+    stored = await set_target_duration_sec(session, seconds)
+    await state.clear()
+    text, kb = await _build_menu(session)
+    await message.answer(
+        f"✅ Длительность сохранена: "
+        f"<code>{format_duration_label(stored)}</code>\n\n" + text,
+        reply_markup=kb,
+    )
+
+
 # ---------- test generation ----------
 
 @router.callback_query(F.data == "suno:gen_open")
@@ -394,11 +514,18 @@ async def receive_test_prompt(
 
     model = await get_model(session)
     callback_url = await get_callback_url(session)
+    target_duration_sec = await get_target_duration_sec(session)
+
+    # Append a length-hint to the user's prompt so Suno aims at the
+    # configured target duration instead of the model's natural ceiling
+    # (which on V4 is 4 minutes and on V4_5+/all is 8). Idempotent — a
+    # prompt that already contains "[Length:" is not re-tagged.
+    final_prompt = append_duration_hint(text, target_duration_sec)
 
     client = SunoApiOrgClient(api_key)
     try:
         task_id = await client.generate_music(
-            prompt=text,
+            prompt=final_prompt,
             model=model,
             callback_url=callback_url,
             custom_mode=False,
@@ -418,6 +545,7 @@ async def receive_test_prompt(
         "🎵 <b>Задача отправлена</b>\n\n"
         f"🆔 <code>{html.escape(task_id)}</code>\n"
         f"🎚 Модель: <code>{html.escape(model)}</code>\n"
+        f"🎯 Цель: <code>{format_duration_label(target_duration_sec)}</code>\n"
         "⏳ Жду готовности (обычно 2–3 минуты)…\n\n"
         "Можно в любой момент проверить вручную:\n"
         f"<code>/suno_status {html.escape(task_id)}</code>"
@@ -432,7 +560,7 @@ async def receive_test_prompt(
             notify_message_id=sent.message_id,
             requested_by=message.from_user.id if message.from_user else None,
             model=model,
-            prompt=text,
+            prompt=final_prompt,
         ),
         name=f"suno-watch:{task_id}",
     )

@@ -13,19 +13,21 @@
 | A | Suno API настройка через бота (sunoapi.org) — независимая от 1–6 | `[~]` | 0 | 7 | 7 |
 | 1 | Capture pipeline: миграция `chat_messages`, хэндлер-логгер, конфиг-фикс | `[~]` | 4 | 1 | 5 |
 | B | Music storage UI: `/musiclist` + `/musicmenu`, песни хранятся бессрочно | `[~]` | 0 | 4 | 4 |
+| C | Observability + unified `/musicmenu` + simplified OpenRouter + target duration | `[~]` | 0 | 7 | 7 |
 | 2 | LLM-абстракция: OpenRouter-клиент, таблица `llm_models`, рантайм-управление через `/menu` | `[ ]` | 0 | 0 | 6 |
 | 3 | Summarizer + songwriter: map-reduce, JSON-парсинг с ретраями, dry-run `/song_test` | `[ ]` | 0 | 0 | 4 |
 | 4 | Song-провайдер + оркестратор: миграция `daily_songs`, SunoApiOrgProvider+SunoSelfHosted+LyricsOnly, `daily_song.py`, `/song_now`, scheduler-job, постинг в чат | `[ ]` | 0 | 0 | 7 |
 | 5 | Полировка: `/song_stats`, `/song_purge`, alert при первом включении, sweep `stale_on_restart` | `[ ]` | 0 | 0 | 4 |
 | 6 | Опционально: тесты-смоук, retention-cron, обложка mp3 | `[ ]` | 0 | 0 | 3 |
 
-**Итого**: 5 / 12 / 41
+**Итого**: 5 / 19 / 48
 
 ## Открытые PR
 
 | PR | Ветка | Фаза | Описание |
 |----|-------|------|----------|
 | [#26](https://github.com/pavlodrab/ideabottg/pull/26) | `feat/suno-api-bot-config` | A | sunoapi.org интеграция: API-ключ/модель/тестовая генерация через `/suno` в боте |
+| [#28](https://github.com/pavlodrab/ideabottg/pull/28) | `feat/openrouter-musicmenu-logs` | C | unified `/musicmenu` (DM admin home), `/logs`, OpenRouter MVP, target song duration, MAX_TEXT_LEN=4096, oldest-row в `/captured` |
 
 ---
 
@@ -183,6 +185,66 @@ vse cherez bota nastroit»). Никаких env-переменных для Suno
 - [~] **B.4** FSM `MusicCustomStyle.waiting_text` в `app/states.py` для свободного ввода кастомного стиля. _(PR [#26](https://github.com/pavlodrab/ideabottg/pull/26))_
 
 **Definition of done фазы B**: юзер в групповом чате пишет `/musiclist` → видит ленту песен, тапает `▶️ 1` → бот присылает mp3 в чат. Админ в той же группе пишет `/musicmenu` → выбирает «🌙 Lo-fi» → следующая Phase-4 daily-song будет генериться в этом стиле.
+
+---
+
+## Фаза C — Observability + unified `/musicmenu` + simplified OpenRouter + target duration
+
+> **Все `[~]` задачи ниже — в [PR #28](https://github.com/pavlodrab/ideabottg/pull/28)** (`feat/openrouter-musicmenu-logs`). После мерджа маркеры переключаются `[~]` → `[x]` в первом следующем PR.
+
+Параллельная фаза, реализованная вместе с Phase 1 / B. Цель — закрыть
+владельцеву задачу «всё управление ботом в одной менюшке `/musicmenu`»,
+и подготовить инфраструктуру для Phase 3+ (генерация песни на основе
+чата): live-логи в боте, OpenRouter-клиент с одной моделью / system
+prompt'ом, ручка длины песни 2–3 минуты.
+
+Существенное архитектурное решение — для MVP мы **не** идём по
+исходной Phase-2 с таблицей `llm_models` (CRUD моделей и per-role
+активация). Вместо этого простые DB-настройки в существующей таблице
+`settings`: `llm.api_key`, `llm.model`, `llm.system_prompt`,
+`llm.referer`. См. обновлённый design.md §3.2 «MVP simplification».
+Phase 2 (`llm_models`) остаётся как **post-MVP расширение**.
+
+- [~] **C.1** `app/services/logs.py` — `RingBufferLogHandler` (deque, capacity 500), `install_ring_buffer_handler()`, `get_recent()`, словарь уровней `LEVEL_TOKENS`. Подключается из `app/main.py` сразу после `logging.basicConfig` — параллельно со stdout, не вместо него. Зависимостей не добавляет.
+- [~] **C.2** `app/handlers/logs.py` — команда `/logs [level] [N]` (DM-only, admin-only), inline-клавиатура переключения уровня (Все / INFO+ / WARN+ / ERROR+), кнопка «📥 Скачать .txt». Если рендер >80 строк — отдаём документом, иначе `<pre>`-блоком. Кнопка «📜 Логи» добавлена в новое `/musicmenu`.
+- [~] **C.3** Unified DM `/musicmenu` (admin home):
+  - Новый `app/keyboards/musicmenu.py` (`musicmenu_home_keyboard`, `render_musicmenu_home_text`, `musicmenu_styles_keyboard`) — рендерит health-индикаторы 🟢/🔴 для Suno и OpenRouter API-ключей, текущую модель и target-duration прямо на главном экране.
+  - Новый `app/handlers/musicmenu_admin.py` — обрабатывает `/musicmenu` в DM, callback'и `mm:home` / `mm:styles` / `mm:archive` + перехватывает legacy `home` callback.
+  - `/musicmenu` в группе остаётся per-chat (style picker) — фильтр в `app/handlers/music.py::cmd_musicmenu` теперь только `group/supergroup`.
+  - `/start` для админов и `/menu` показывают тот же unified экран (через `build_home_view`).
+  - Старая `home_keyboard` в `app/keyboards/menus.py` остаётся как dead-code-fallback (без callsites), `_home_text` помечен как legacy.
+- [~] **C.4** Simplified OpenRouter (без llm_models таблицы):
+  - `app/services/llm.py` — `OpenRouterClient` (httpx) с `chat()` и `get_key_info()`, dataclass'ы `LlmKeyInfo` / `ChatResult` (с `parse_json`-helper'ом), `LlmApiError` с `humanized()`-маппингом кодов 401/402/404/408/413/429/5xx. DB-helpers `get/set/clear_api_key`, `get/set_model`, `get/set_system_prompt`, `get_referer`. Каталог `SUPPORTED_MODELS` с дефолтом `google/gemini-2.0-flash-exp:free` (бесплатный) и встроенным songwriter system prompt.
+  - `app/keyboards/llm.py` — главное меню, picker модели, экран prompt'а, подтверждение удаления ключа.
+  - `app/handlers/llm_admin.py` — команды `/llm`, callback'и `llm:home / set_key / remove_key{,_yes} / credits / model_open / model_set:<slug> / model_custom / prompt_open / prompt_edit / prompt_reset / test_open`. FSM-стейты `LlmApiKeyEditing`, `LlmModelEditing`, `LlmSystemPromptEditing`, `LlmTestPrompt` в `app/states.py`. Валидация ключа звонком в `/auth/key`. «🧪 Тестовый запрос» — отправляет user-prompt в активную модель с текущим system prompt и возвращает сырой ответ + статус JSON-парсинга.
+- [~] **C.5** Suno target-duration:
+  - `app/services/suno.py` — `KEY_TARGET_DURATION_SEC`, `DEFAULT_TARGET_DURATION_SEC=150`, `DURATION_PRESETS_SEC=(90,120,150,180,240)`, `MIN/MAX_TARGET_DURATION_SEC`, helpers `get/set_target_duration_sec`, `format_duration_label`, `format_duration_hint`, `append_duration_hint` (идемпотентен — не дублирует `[Length:` если уже есть в prompt).
+  - `app/keyboards/suno.py::suno_duration_keyboard` — пресеты 1:30 / 2:00 / 2:30 / 3:00 / 4:00 + кастомный ввод.
+  - `app/handlers/suno_admin.py` — кнопка «🎯 Длительность» в основном меню Suno + дублирование на главном `/musicmenu` экране, callback'и `suno:duration_open / duration_set:<sec> / duration_custom`, FSM `SunoDurationCustom.waiting_seconds`.
+  - В `receive_test_prompt` (Suno test-gen) к user-промпту автоматически добавляется duration-hint через `append_duration_hint(...)` — Suno чаще попадает в 2-3 минуты вместо 4-минутного потолка V4.
+- [~] **C.6** `chat_messages` retention sanity:
+  - `MAX_TEXT_LEN` 2000 → 4096 (телеграм-cap), чтобы лонгриды не теряли хвост перед уходом в LLM-summarizer.
+  - Новый helper `oldest_message_at(chat_id?)` — возвращает timestamp самой старой строки в `chat_messages`.
+  - `/captured` в DM (как с аргументом `<chat_id>`, так и без) теперь показывает «Самое старое: YYYY-MM-DD HH:MM UTC» — наглядное подтверждение, что retention-job (час/раз с PR #26) реально работает и не даёт таблице вырасти бесконечно.
+- [~] **C.7** Help-текст и навигация:
+  - `/start` для админа сразу открывает unified `/musicmenu` экран вместо текстового списка команд.
+  - `/help` обновлён под новый набор команд (`/musicmenu`, `/llm`, `/logs`).
+  - Старые callbacks `home` со старых клавиатур (Suno, qh, chats list) теперь ведут на тот же unified экран (`mm:home` логика в musicmenu_admin перехватывает их).
+
+**Definition of done фазы C**:
+1. Владелец пишет `/musicmenu` в DM → видит единый экран с 🟢/🔴 индикаторами Suno и OpenRouter, кнопками для длительности, стилей чатов, логов.
+2. Тапает «🤖 OpenRouter · 🔴 · ...» → попадает в OpenRouter-меню → задаёт ключ openrouter.ai → бот валидирует через `/auth/key`, показывает `usage`/`limit` → главный экран теперь 🟢.
+3. Тапает «🧪 Тестовый запрос», отправляет «Сделай SongDraft про субботнее утро» → бот возвращает JSON в `<pre>` блоке + статус `✅ JSON parsed`.
+4. Тапает «🎯 Длительность» → выбирает 2:30 → следующая `🧪 Тестовая генерация` Suno уйдёт с `[Length: about 2:30]` в prompt.
+5. Открывает «📜 Логи» → видит последние 50 строк bot-логов прямо в Telegram, может переключить уровень на ERROR+.
+6. `/captured` в DM показывает «Самое старое: YYYY-MM-DD HH:MM UTC» — retention видимо работает.
+
+**Что НЕ делает фаза C** (это уже Phase 3+):
+- Сама генерация песни на основе сообщений чата (саммаризатор + songwriter pipeline).
+- Scheduler-job для «Песни дня».
+- Постинг готовой песни в группу.
+
+Для Phase 3+ инфраструктура полностью готова: `OpenRouterClient.chat(...)` ходит в выбранную модель, `system_prompt` уже в стиле songwriter, `target_duration_sec` подставляется в Suno. Останется собрать `summarize_day` + `digest_to_song` + `daily_song.py` оркестратор поверх этого.
 
 ---
 

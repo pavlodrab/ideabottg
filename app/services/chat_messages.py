@@ -24,11 +24,10 @@ from app.models import ChatMessage
 # embedded "ttl" concept.
 RETENTION_DAYS = 2
 
-# Hard cap on a single message body to avoid blowing up rows on weird
-# input (forwarded long posts, copy-pasted novels, etc.). Telegram
-# itself caps text at 4096; we keep enough for an LLM-summarizer to
-# work with.
-MAX_TEXT_LEN = 2000
+# Hard cap on a single message body. Telegram caps text at 4096; we keep
+# the same ceiling so nothing said in chat is silently truncated before
+# it reaches the LLM-summarizer. Captions ride the same limit.
+MAX_TEXT_LEN = 4096
 
 
 async def insert_message(
@@ -99,6 +98,23 @@ async def fetch_messages_since(
     )
     result = await session.execute(stmt)
     return list(result.scalars().all())
+
+
+async def oldest_message_at(
+    session: AsyncSession, *, chat_id: int | None = None
+) -> datetime | None:
+    """Timestamp of the oldest captured message, optionally per-chat.
+
+    Used by ``/captured`` to surface "messages start from <date>" so
+    admins can verify the retention sweep is actually running and tell
+    at a glance how much history the daily-song pipeline has to work
+    with right now.
+    """
+    stmt = select(func.min(ChatMessage.created_at))
+    if chat_id is not None:
+        stmt = stmt.where(ChatMessage.chat_id == chat_id)
+    result = await session.execute(stmt)
+    return result.scalar()
 
 
 async def delete_older_than(

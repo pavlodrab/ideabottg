@@ -53,6 +53,13 @@ async def main() -> None:
     )
     log = logging.getLogger("ideabottg")
 
+    # In-memory ring buffer so admins can read recent logs from inside
+    # Telegram via /logs (without opening Railway). Installed AFTER
+    # basicConfig so it doesn't get wiped by force=True.
+    from app.services.logs import install_ring_buffer_handler
+
+    install_ring_buffer_handler()
+
     log.info("DB target: %s", settings.database_url_masked)
 
     _install_signal_logging()

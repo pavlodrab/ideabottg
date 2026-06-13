@@ -69,26 +69,34 @@ async def cb_home(callback: CallbackQuery, session: AsyncSession) -> None:
 
 
 async def _send_home(message: Message, session: AsyncSession) -> None:
-    chats = await list_chats(session)
-    admins = await list_admins(session)
-    await message.answer(
-        _home_text(len(chats), len(admins)),
-        reply_markup=home_keyboard(len(chats), len(admins)),
-    )
+    # Delegate to the unified /musicmenu screen so /menu and
+    # /musicmenu always show identical content.
+    from app.handlers.musicmenu_admin import build_home_view  # noqa: PLC0415
+
+    text, kb = await build_home_view(session)
+    await message.answer(text, reply_markup=kb, disable_web_page_preview=True)
 
 
 async def _edit_home(callback: CallbackQuery, session: AsyncSession) -> None:
-    chats = await list_chats(session)
-    admins = await list_admins(session)
+    from app.handlers.musicmenu_admin import build_home_view  # noqa: PLC0415
+
+    text, kb = await build_home_view(session)
     if isinstance(callback.message, Message):
-        await callback.message.edit_text(
-            _home_text(len(chats), len(admins)),
-            reply_markup=home_keyboard(len(chats), len(admins)),
-        )
+        try:
+            await callback.message.edit_text(
+                text, reply_markup=kb, disable_web_page_preview=True
+            )
+        except Exception:  # noqa: BLE001
+            # edit can fail when content is unchanged — that's fine,
+            # the user just sees no flicker.
+            pass
     await callback.answer()
 
 
 def _home_text(n_chats: int, n_admins: int) -> str:
+    """Legacy text helper, kept for backward compatibility but no longer
+    used by the live /menu flow (which delegates to the unified
+    musicmenu home). Tests / external callers may still reference it."""
     return (
         "🤖 <b>IdeaBot — главное меню</b>\n\n"
         f"📋 Чатов: <b>{n_chats}</b>\n"

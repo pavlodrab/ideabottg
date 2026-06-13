@@ -32,14 +32,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.keyboards.music import (
     STYLE_LABEL_BY_SLUG,
     STYLE_PROMPT_BY_SLUG,
-    music_chat_picker_keyboard,
     music_list_keyboard,
     music_menu_keyboard,
     music_style_back_keyboard,
 )
 from app.models import Chat, Song
 from app.services.admins import is_admin
-from app.services.chat_messages import RETENTION_DAYS, count_messages
+from app.services.chat_messages import (
+    RETENTION_DAYS,
+    count_messages,
+    oldest_message_at,
+)
 from app.services.chats import list_chats
 from app.services.songs import (
     PAGE_SIZE,
@@ -217,46 +220,36 @@ async def cb_music_play(
 
 # ---------- /musicmenu ----------
 
-@router.message(Command("musicmenu"))
+@router.message(
+    Command("musicmenu"),
+    F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}),
+)
 async def cmd_musicmenu(
     message: Message, state: FSMContext, session: AsyncSession
 ) -> None:
-    """Admin-only. In groups configures that chat. In DM picks one."""
+    """Group /musicmenu: per-chat song style picker.
+
+    The DM /musicmenu is handled by ``musicmenu_admin.py`` and shows
+    the unified bot-management home. We deliberately split on chat
+    type so each context gets the most useful screen first.
+    """
     user = message.from_user
     if user is None or not await is_admin(session, user.id):
         return  # silent — same convention as other admin-only cmds
 
     await state.clear()
 
-    if message.chat.type in {ChatType.GROUP, ChatType.SUPERGROUP}:
-        chat = await session.get(Chat, message.chat.id)
-        if chat is None:
-            await message.answer(
-                "⚠️ Этот чат пока не зарегистрирован у бота. "
-                "Перезайди ботом в чат и попробуй ещё раз."
-            )
-            return
+    chat = await session.get(Chat, message.chat.id)
+    if chat is None:
         await message.answer(
-            _render_menu_text(chat),
-            reply_markup=music_menu_keyboard(chat.chat_id, chat.song_style),
+            "⚠️ Этот чат пока не зарегистрирован у бота. "
+            "Перезайди ботом в чат и попробуй ещё раз."
         )
         return
-
-    if message.chat.type == ChatType.PRIVATE:
-        chats = await list_chats(session)
-        if not chats:
-            await message.answer(
-                "🤷 Нет ни одного зарегистрированного чата. "
-                "Сначала добавь меня в группу."
-            )
-            return
-        await message.answer(
-            "🎵 <b>Стиль песни дня — выбери чат</b>\n\n"
-            "Стиль настраивается отдельно для каждого чата. "
-            "Когда поверх соберётся фича «Песня дня», она будет "
-            "использовать стиль чата, в котором публикуется.",
-            reply_markup=music_chat_picker_keyboard(chats),
-        )
+    await message.answer(
+        _render_menu_text(chat),
+        reply_markup=music_menu_keyboard(chat.chat_id, chat.song_style),
+    )
 
 
 @router.callback_query(F.data.startswith("music:menu_open:"))
@@ -475,12 +468,19 @@ async def cmd_captured(message: Message, session: AsyncSession) -> None:
         last_24h = await count_messages(
             session, chat_id=chat_id, since=cutoff_24h
         )
+        oldest = await oldest_message_at(session, chat_id=chat_id)
+        oldest_line = (
+            f"Самое старое: <code>{oldest.strftime('%Y-%m-%d %H:%M UTC')}</code>"
+            if oldest is not None
+            else "Самое старое: —"
+        )
         status = "🟢 активен" if chat.is_active else "🟡 на паузе"
         await message.answer(
             f"📊 <b>{html.escape(chat.title or str(chat.chat_id))}</b>\n"
             f"{status}\n\n"
             f"Захвачено за 24 часа: <b>{last_24h}</b>\n"
-            f"Всего в базе (≤{RETENTION_DAYS} дн.): <b>{total}</b>"
+            f"Всего в базе (≤{RETENTION_DAYS} дн.): <b>{total}</b>\n"
+            f"{oldest_line}"
         )
         return
 
@@ -494,11 +494,19 @@ async def cmd_captured(message: Message, session: AsyncSession) -> None:
 
     grand_total = await count_messages(session)
     grand_24h = await count_messages(session, since=cutoff_24h)
+    grand_oldest = await oldest_message_at(session)
 
     lines = [
         f"📊 <b>Захвачено сообщений</b>  ·  retention {RETENTION_DAYS} дн.\n",
-        f"<b>Итого</b> · 24ч: {grand_24h} · всего: {grand_total}\n",
+        f"<b>Итого</b> · 24ч: {grand_24h} · всего: {grand_total}",
     ]
+    if grand_oldest is not None:
+        lines.append(
+            f"<i>Самая старая запись: "
+            f"{grand_oldest.strftime('%Y-%m-%d %H:%M UTC')}</i>\n"
+        )
+    else:
+        lines.append("<i>Записей пока нет.</i>\n")
     for chat in chats:
         last_24h = await count_messages(
             session, chat_id=chat.chat_id, since=cutoff_24h
