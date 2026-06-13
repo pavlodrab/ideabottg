@@ -29,3 +29,7 @@ class SunoApiKeyEditing(StatesGroup):
 
 class SunoTestPrompt(StatesGroup):
     waiting_prompt = State()
+
+
+class MusicCustomStyle(StatesGroup):
+    waiting_text = State()

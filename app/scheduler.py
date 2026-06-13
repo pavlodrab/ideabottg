@@ -10,6 +10,11 @@ from aiogram import Bot
 from app.config import settings
 from app.db import SessionLocal
 from app.models import Admin, Chat
+from app.services.chat_messages import (
+    RETENTION_DAYS,
+    cutoff_for_retention,
+    delete_older_than,
+)
 from app.services.digest import send_digest_to_admin
 from app.services.prompts import send_prompt_to_chat
 
@@ -17,6 +22,13 @@ log = logging.getLogger(__name__)
 
 PROMPT_PREFIX = "prompt:"
 DIGEST_PREFIX = "digest:"
+RETENTION_JOB_ID = "retention:chat_messages"
+
+# Cron expression for the chat-messages retention sweep. "5 * * * *"
+# runs every hour at xx:05 — staggered slightly off the top of the
+# hour so it doesn't collide with prompts that typically schedule on
+# the hour exactly.
+RETENTION_CRON = "5 * * * *"
 
 
 def _prompt_job_id(chat_id: int) -> str:
@@ -64,9 +76,13 @@ class IdeaScheduler:
         for admin in admins:
             self._schedule_digest(admin.user_id, admin.digest_cron)
 
+        # Always-on housekeeping: prune chat_messages older than the
+        # retention window every hour.
+        self._schedule_retention()
+
         self._scheduler.start()
         log.info(
-            "scheduler started with %d prompt + %d digest job(s)",
+            "scheduler started with %d prompt + %d digest job(s) + retention",
             len(chats),
             len(admins),
         )
@@ -182,3 +198,47 @@ class IdeaScheduler:
             log.info("unscheduled job=%s", job_id)
         except JobLookupError:
             pass
+
+    # ---------- chat-messages retention ----------
+
+    def _schedule_retention(self) -> None:
+        """Hourly sweep that deletes ``chat_messages`` older than the
+        retention window. Idempotent — safe to call multiple times."""
+        try:
+            trigger = CronTrigger.from_crontab(
+                RETENTION_CRON, timezone=settings.tz
+            )
+        except ValueError as exc:
+            log.error(
+                "invalid retention cron %r: %s", RETENTION_CRON, exc
+            )
+            return
+
+        self._scheduler.add_job(
+            self._run_retention,
+            trigger=trigger,
+            id=RETENTION_JOB_ID,
+            replace_existing=True,
+            misfire_grace_time=600,
+            coalesce=True,
+            max_instances=1,
+        )
+        log.info(
+            "scheduled chat_messages retention every hour (>%dd)",
+            RETENTION_DAYS,
+        )
+
+    async def _run_retention(self) -> None:
+        cutoff = cutoff_for_retention(RETENTION_DAYS)
+        async with SessionLocal() as session:
+            try:
+                deleted = await delete_older_than(session, cutoff)
+            except Exception:  # noqa: BLE001
+                log.exception("retention sweep failed")
+                return
+        if deleted:
+            log.info(
+                "retention: deleted %d chat_messages older than %s",
+                deleted,
+                cutoff.isoformat(),
+            )

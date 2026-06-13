@@ -10,15 +10,16 @@
 | Фаза | Что делает | Статус | Done | In PR | Total |
 |------|-----------|--------|------|-------|-------|
 | 0 | Спека (этот файл + requirements + design) | `[x]` | 1 | 0 | 1 |
-| A | Suno API настройка через бота (sunoapi.org) — независимая от 1–6 | `[~]` | 0 | 6 | 6 |
-| 1 | Capture pipeline: миграция `chat_messages`, хэндлер-логгер, конфиг-фикс | `[ ]` | 0 | 0 | 5 |
+| A | Suno API настройка через бота (sunoapi.org) — независимая от 1–6 | `[~]` | 0 | 7 | 7 |
+| 1 | Capture pipeline: миграция `chat_messages`, хэндлер-логгер, конфиг-фикс | `[~]` | 4 | 1 | 5 |
+| B | Music storage UI: `/musiclist` + `/musicmenu`, песни хранятся бессрочно | `[~]` | 0 | 4 | 4 |
 | 2 | LLM-абстракция: OpenRouter-клиент, таблица `llm_models`, рантайм-управление через `/menu` | `[ ]` | 0 | 0 | 6 |
 | 3 | Summarizer + songwriter: map-reduce, JSON-парсинг с ретраями, dry-run `/song_test` | `[ ]` | 0 | 0 | 4 |
 | 4 | Song-провайдер + оркестратор: миграция `daily_songs`, SunoApiOrgProvider+SunoSelfHosted+LyricsOnly, `daily_song.py`, `/song_now`, scheduler-job, постинг в чат | `[ ]` | 0 | 0 | 7 |
 | 5 | Полировка: `/song_stats`, `/song_purge`, alert при первом включении, sweep `stale_on_restart` | `[ ]` | 0 | 0 | 4 |
 | 6 | Опционально: тесты-смоук, retention-cron, обложка mp3 | `[ ]` | 0 | 0 | 3 |
 
-**Итого**: 1 / 6 / 36
+**Итого**: 5 / 12 / 41
 
 ## Открытые PR
 
@@ -66,6 +67,10 @@ vse cherez bota nastroit»). Никаких env-переменных для Suno
   - `TaskSnapshot.error_message` парсит `data.errorMessage` (есть в OpenAPI-схеме) — теперь юзеру в фейле видна причина из API, а не только статус-код.
   - `SunoApiError.humanized()` — гуманайзер кодов ошибок Suno (401/413/429/430/455/etc.) на русский. Используется во всех местах вывода ошибок (валидация ключа, баланс, генерация, статус). _(PR [#26](https://github.com/pavlodrab/ideabottg/pull/26))_
   - В success-сообщении тестовой генерации появилась подсказка про 15-дневный retention файлов на серверах Suno.
+- [~] **A.7** Архив сгенерированных песен + захват Telegram `file_id`:
+  - Новая таблица `songs` (миграция `0006`): id, chat_id, suno_task_id, suno_audio_id, title, style, model, prompt, lyrics, audio_url, stream_url, image_url, duration, **tg_audio_file_id**, requested_by, status, created_at. Songs хранятся бессрочно — retention их не трогает.
+  - Сервис `app/services/songs.py`: `upsert_song` (идемпотентен по `suno_task_id`, безопасен для polling-callbacks `text` → `first` → `complete`), `set_tg_file_id`, `list_songs_for_chat`, `list_songs_for_user(is_admin)`, `get_song`.
+  - В `_watch_task` (Suno test-gen) после `SUCCESS` сразу пишется `Song`-row, после успешного `send_audio` сохраняется Telegram `file_id` — это значит, что после первого проигрывания в боте песню можно бесконечно отдавать через Telegram даже после Suno's 15-day URL retention. _(PR [#26](https://github.com/pavlodrab/ideabottg/pull/26))_
 
 **Definition of done фазы A**: владелец задаёт ключ через `/suno → 🔑 Задать API-ключ`, видит баланс кредитов, выбирает модель, нажимает «🧪 Тестовая генерация», вводит prompt → через 2–3 минуты бот в личке присылает mp3.
 
@@ -153,6 +158,31 @@ vse cherez bota nastroit»). Никаких env-переменных для Suno
 - [ ] **6.1** Smoke-тесты для `summarize_day` / `digest_to_song` / `LyricsOnlyProvider` (только если попросят).
 - [ ] **6.2** Retention-cron: `chat_messages` старше `SONG_RETENTION_DAYS` (default 30) удалять.
 - [ ] **6.3** Обложка: пробросить `image_url` из Suno-ответа, прикладывать к посту.
+
+---
+
+## Фаза 1 — Capture pipeline
+
+- [x] **1.1** Миграция `0006_chat_messages_and_songs`: новая таблица `chat_messages` (id, chat_id FK, tg_message_id, user_id, username, full_name, text, created_at) + индексы и UniqueConstraint(chat_id, tg_message_id) inline (sqlite-friendly). _(PR [#26](https://github.com/pavlodrab/ideabottg/pull/26))_
+- [x] **1.2** Модель `ChatMessage` в `app/models.py` + сервис `app/services/chat_messages.py` (`insert_message` с дедупом по unique-constraint, `count_messages`, `fetch_messages_since`, `delete_older_than`, `cutoff_for_retention`). RETENTION_DAYS=2, MAX_TEXT_LEN=2000. _(PR [#26](https://github.com/pavlodrab/ideabottg/pull/26))_
+- [x] **1.3** Capture middleware `app/middlewares/capture.py`: ловит текст и captions из group/supergroup, пропускает ботов, команды (`/`), не-text сообщения, не-зарегистрированные и paused чаты. Всегда swallow exceptions — никогда не блокирует основной handler-chain. Регистрируется ПОСЛЕ `DbSessionMiddleware` чтобы иметь `data["session"]`. _(PR [#26](https://github.com/pavlodrab/ideabottg/pull/26))_
+- [x] **1.4** Retention scheduler-job в `IdeaScheduler.start()`: cron `5 * * * *` (каждый час в xx:05), запускает `delete_older_than(cutoff_for_retention(2))`. Логирует число удалённых строк. _(PR [#26](https://github.com/pavlodrab/ideabottg/pull/26))_
+- [~] **1.5** Команда `/captured [chat_id]` в `app/handlers/music.py` — DM-only, admin-only диагностика: показывает 24h-window и total-в-окне-retention для каждого зарегистрированного чата (без аргумента) или для одного (с chat_id-аргументом). _(PR [#26](https://github.com/pavlodrab/ideabottg/pull/26))_
+
+---
+
+## Фаза B (новая) — Music storage UI поверх Suno
+
+Параллельная фаза, реализованная вместе с Phase 1: даёт юзерам видеть и
+проигрывать сгенерированные песни прямо в Telegram, и админам настраивать
+дефолтный стиль для каждого чата.
+
+- [~] **B.1** `/musiclist` в `app/handlers/music.py` — открыто всем, без admin-gate. В групповом чате показывает песни этого чата; в DM показывает песни юзера (по `requested_by`), а админ видит весь cross-chat архив. По 5 на страницу, кнопки `▶️ N` отправляют mp3 в-place через `send_audio`. После первого `send_audio` Telegram `file_id` сохраняется в `Song.tg_audio_file_id` и используется для всех последующих воспроизведений (бессмертно). _(PR [#26](https://github.com/pavlodrab/ideabottg/pull/26))_
+- [~] **B.2** `/musicmenu` — admin-only, выбор дефолтного стиля для чата. В группе сразу открывает меню для текущего чата; в DM показывает chat-picker. 12 пресетов (Pop / Rock / Lo-fi / Folk / Synthwave / Hip-hop / Classical / Jazz / Electronic / Ambient / Indie / Metal) + Custom (FSM-ввод произвольного текста до 500 символов) + Reset. Сохраняется в `chats.song_style` (новая колонка). _(PR [#26](https://github.com/pavlodrab/ideabottg/pull/26))_
+- [~] **B.3** Keyboards `app/keyboards/music.py`: `music_list_keyboard` (play row + pagination), `music_menu_keyboard` (12 presets с ✅-маркером + Custom + Reset), `music_chat_picker_keyboard` (DM выбор чата), `music_style_back_keyboard`. Callback-namespace `music:*` (без коллизий с `suno:*` / `chat:*` / `prompt:*` / etc.). _(PR [#26](https://github.com/pavlodrab/ideabottg/pull/26))_
+- [~] **B.4** FSM `MusicCustomStyle.waiting_text` в `app/states.py` для свободного ввода кастомного стиля. _(PR [#26](https://github.com/pavlodrab/ideabottg/pull/26))_
+
+**Definition of done фазы B**: юзер в групповом чате пишет `/musiclist` → видит ленту песен, тапает `▶️ 1` → бот присылает mp3 в чат. Админ в той же группе пишет `/musicmenu` → выбирает «🌙 Lo-fi» → следующая Phase-4 daily-song будет генериться в этом стиле.
 
 ---
 
