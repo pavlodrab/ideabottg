@@ -35,6 +35,7 @@ from app.services.song_pipeline import (
     SongPipelineError,
     TASK_POLL_INTERVAL_SEC,
     TASK_TIMEOUT_SEC,
+    deliver_song,
     generate_song_draft,
 )
 from app.services.song_provider import (
@@ -220,50 +221,22 @@ async def _deliver(
 
     await _cleanup_placeholder(bot, chat_id, placeholder_id)
 
-    # Cover art (6.3).
-    if result.image_url:
-        with contextlib.suppress(Exception):
-            await bot.send_photo(
-                chat_id,
-                photo=result.image_url,
-                caption=f"🎵 {html.escape(title)}",
-            )
-
-    caption = f"🎵 {html.escape(title)}"
-    if draft.style:
-        caption += f"\n🎨 <i>{html.escape(draft.style[:120])}</i>"
-
-    sent = None
-    try:
-        sent = await bot.send_audio(
-            chat_id,
-            audio=result.audio_url,
-            title=title[:64],
-            performer="Suno",
-            caption=caption,
-        )
-    except Exception as exc:  # noqa: BLE001
-        log.warning("daily-song: chat %s send_audio failed: %s", chat_id, exc)
-        with contextlib.suppress(Exception):
-            await bot.send_message(
-                chat_id,
-                f"🔗 <a href=\"{html.escape(result.audio_url)}\">Скачать mp3</a>",
-            )
+    # Single-message delivery: audio with cover thumbnail + caption.
+    sent = await deliver_song(
+        bot,
+        chat_id,
+        audio_ref=result.audio_url,
+        title=title,
+        style=draft.style,
+        lyrics=draft.lyrics,
+        image_url=result.image_url,
+    )
 
     # Capture the permanent Telegram file_id.
     if song_id is not None and sent is not None and sent.audio:
         with contextlib.suppress(Exception):
             async with SessionLocal() as session:
                 await set_tg_file_id(session, song_id, sent.audio.file_id)
-
-    # Lyrics as a separate message (audio caption can't hold them).
-    if draft.lyrics:
-        with contextlib.suppress(Exception):
-            await bot.send_message(
-                chat_id,
-                f"<pre>{html.escape(draft.lyrics)[:3500]}</pre>",
-                disable_web_page_preview=True,
-            )
 
     await _finalize(run_id, "done", song_id=song_id)
     # Bookkeeping on the chat row.

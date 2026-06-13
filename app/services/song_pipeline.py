@@ -46,8 +46,11 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from io import BytesIO
 
+import httpx
 from aiogram import Bot
+from aiogram.types import BufferedInputFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import SessionLocal
@@ -755,6 +758,136 @@ async def start_song_from_prompt(
 
 # ---------- step 4: Suno polling + delivery ----------
 
+# Telegram caption hard limit (chars). We keep a small margin.
+CAPTION_LIMIT = 1024
+# Telegram audio thumbnail limits: JPEG, ≤320px, ≤200 KB.
+THUMB_MAX_PX = 320
+THUMB_MAX_BYTES = 200_000
+
+
+def build_song_caption(
+    title: str | None,
+    style: str | None,
+    lyrics: str | None,
+    *,
+    limit: int = CAPTION_LIMIT,
+) -> str:
+    """Compose a single audio caption: title + style + as much of the
+    lyrics as fits under Telegram's caption limit (truncated with …).
+
+    Length is measured on the raw HTML string (tags included), which
+    over-counts vs Telegram's entity-stripped count — i.e. conservative,
+    never overflows.
+    """
+    head = f"🎵 <b>{html.escape(title or '(без названия)')}</b>"
+    if style:
+        head += f"\n🎨 <i>{html.escape(style[:120])}</i>"
+    if not lyrics:
+        return head[:limit]
+    sep = "\n\n"
+    budget = limit - len(head) - len(sep) - 1
+    if budget <= 0:
+        return head[:limit]
+    body = html.escape(lyrics)
+    if len(body) > budget:
+        body = body[:budget].rstrip() + "…"
+    return head + sep + body
+
+
+def _make_thumbnail(data: bytes) -> bytes | None:
+    """Resize cover art to a Telegram-legal audio thumbnail (≤320px
+    JPEG, ≤200 KB). Returns None if Pillow is missing or the image is
+    unreadable — the caller then sends audio without a thumbnail."""
+    try:
+        from PIL import Image  # local import: optional dep
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        im = Image.open(BytesIO(data)).convert("RGB")
+        im.thumbnail((THUMB_MAX_PX, THUMB_MAX_PX))
+        out = BytesIO()
+        im.save(out, format="JPEG", quality=85)
+        b = out.getvalue()
+        return b if len(b) <= THUMB_MAX_BYTES else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+async def _fetch_thumbnail(url: str) -> bytes | None:
+    """Download cover art and turn it into a legal thumbnail. Best
+    effort — any failure returns None (audio still sends)."""
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            resp = await client.get(url)
+        if resp.status_code != 200:
+            return None
+        return _make_thumbnail(resp.content)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+async def deliver_song(
+    bot: Bot,
+    chat_id: int,
+    *,
+    audio_ref: str,
+    title: str | None,
+    style: str | None,
+    lyrics: str | None,
+    image_url: str | None,
+):
+    """Send the finished song as a SINGLE message: one audio with the
+    cover as its thumbnail and title + style + lyrics in the caption.
+
+    Falls back gracefully: if the audio send fails with a thumbnail it
+    retries without; if it fails entirely it posts a download link.
+    Returns the sent ``Message`` (for ``file_id`` capture) or ``None``.
+    """
+    caption = build_song_caption(title, style, lyrics)
+    display_title = (title or "Suno")[:64]
+
+    thumb_bytes = await _fetch_thumbnail(image_url) if image_url else None
+    thumbnail = (
+        BufferedInputFile(thumb_bytes, "cover.jpg") if thumb_bytes else None
+    )
+
+    try:
+        return await bot.send_audio(
+            chat_id,
+            audio=audio_ref,
+            title=display_title,
+            performer="Suno",
+            caption=caption,
+            thumbnail=thumbnail,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("deliver_song send_audio failed (chat %s): %s", chat_id, exc)
+
+    # Retry without thumbnail (the most likely culprit).
+    if thumbnail is not None:
+        try:
+            return await bot.send_audio(
+                chat_id,
+                audio=audio_ref,
+                title=display_title,
+                performer="Suno",
+                caption=caption,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "deliver_song retry without thumb failed (chat %s): %s",
+                chat_id,
+                exc,
+            )
+
+    # Last resort: a link so the song isn't lost.
+    with contextlib.suppress(Exception):
+        await bot.send_message(
+            chat_id,
+            f"🔗 <a href=\"{html.escape(audio_ref)}\">Скачать mp3</a>",
+        )
+    return None
+
 
 async def watch_suno_task(
     *,
@@ -975,54 +1108,20 @@ async def handle_terminal(
                 message_id=placeholder_message_id,
             )
 
-        # 3. Deliver mp3 + capture file_id.
+        # 3. Deliver as a SINGLE message: one audio with the cover as
+        # its thumbnail and title + style + lyrics in the caption.
         if snapshot.audio_url:
-            # Cover art (6.3): Suno returns an image_url for the track.
-            # Post it as a photo right before the audio so the song
-            # lands with a visual. Best-effort — never blocks the mp3.
-            if snapshot.image_url:
-                with contextlib.suppress(Exception):
-                    await bot.send_photo(
-                        audio_chat_id,
-                        photo=snapshot.image_url,
-                        caption=f"🎵 {html.escape(display_title)}",
-                    )
-            caption_lines = [f"🎵 {html.escape(display_title)}"]
-            if effective_style:
-                caption_lines.append(
-                    f"🎨 <i>{html.escape(effective_style[:120])}</i>"
-                )
-            caption = "\n".join(caption_lines)
-            try:
-                sent_audio = await bot.send_audio(
-                    audio_chat_id,
-                    audio=snapshot.audio_url,
-                    title=display_title[:64],
-                    performer="Suno",
-                    caption=caption,
-                )
-            except Exception as exc:  # noqa: BLE001
-                log.warning(
-                    "send_audio for task %s to chat %s failed: %s",
-                    task_id,
-                    audio_chat_id,
-                    exc,
-                )
-                with contextlib.suppress(Exception):
-                    await bot.send_message(
-                        audio_chat_id,
-                        f"🔗 <a href=\"{html.escape(snapshot.audio_url)}\">"
-                        "Скачать mp3</a>",
-                        disable_web_page_preview=False,
-                    )
-                return
-
-            # 4. Permanently capture Telegram's file_id.
-            if (
-                song_id is not None
-                and sent_audio
-                and sent_audio.audio
-            ):
+            sent_audio = await deliver_song(
+                bot,
+                audio_chat_id,
+                audio_ref=snapshot.audio_url,
+                title=display_title,
+                style=effective_style,
+                lyrics=effective_lyrics,
+                image_url=snapshot.image_url,
+            )
+            # Permanently capture Telegram's file_id for instant replays.
+            if song_id is not None and sent_audio and sent_audio.audio:
                 try:
                     async with SessionLocal() as session:
                         await set_tg_file_id(
@@ -1032,20 +1131,6 @@ async def handle_terminal(
                     log.exception(
                         "capture tg_audio_file_id for song %s failed",
                         song_id,
-                    )
-
-            # 5. For the daily-song flow we also drop the lyrics into
-            # the group as a separate message — the audio caption can
-            # only carry ~1024 chars, lyrics often don't fit.
-            if (
-                audio_chat_id != placeholder_chat_id
-                and effective_lyrics
-            ):
-                with contextlib.suppress(Exception):
-                    await bot.send_message(
-                        audio_chat_id,
-                        f"<pre>{html.escape(effective_lyrics)[:3500]}</pre>",
-                        disable_web_page_preview=True,
                     )
         return
 
