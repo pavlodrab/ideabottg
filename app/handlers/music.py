@@ -234,18 +234,32 @@ async def cmd_musicmenu(
     type so each context gets the most useful screen first.
     """
     user = message.from_user
-    if user is None or not await is_admin(session, user.id):
-        return  # silent — same convention as other admin-only cmds
+    if user is None:
+        return
+    if not await is_admin(session, user.id):
+        # Visible (not silent) so an admin testing in a group can tell
+        # the difference between "bot ignored me" and "I'm not a bot
+        # admin". Bot-admins = the OWNER_ID + anyone added via /admins
+        # in DM — NOT Telegram group admins.
+        await message.answer(
+            "🔒 Музыкальное меню — только для админов бота.\n"
+            "Если это твой бот — открой меню в личке: /musicmenu, "
+            "или добавь себя через /admins."
+        )
+        return
 
     await state.clear()
 
     chat = await session.get(Chat, message.chat.id)
     if chat is None:
-        await message.answer(
-            "⚠️ Этот чат пока не зарегистрирован у бота. "
-            "Перезайди ботом в чат и попробуй ещё раз."
+        # Auto-register: the bot might have been added before chat
+        # tracking existed, or the my_chat_member update was missed.
+        # Registering here lets the menu work instead of dead-ending.
+        from app.services.chats import upsert_chat
+
+        chat, _ = await upsert_chat(
+            session, message.chat.id, message.chat.title, True
         )
-        return
     await message.answer(
         _render_menu_text(chat),
         reply_markup=music_menu_keyboard(chat.chat_id, chat.song_style),
